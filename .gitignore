@@ -1,0 +1,12 @@
+# Ambiente
+.venv/
+__pycache__/
+*.pyc
+
+# Segredos e dados locais
+.env
+data/
+*.db
+
+# Editor / SO
+.DS_Store

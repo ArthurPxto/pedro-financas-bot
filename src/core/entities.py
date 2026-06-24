@@ -1,22 +1,101 @@
-from pydantic import BaseModel, Field
+"""Entidades de domínio.
+
+São modelos puros (Pydantic), sem conhecimento de banco, canal ou IA.
+Representam o contrato de negócio compartilhado entre serviços, persistência
+e canais. `id` é Optional: None antes de persistido, preenchido pelo repositório.
+"""
+from datetime import date as date_type, datetime
+from enum import Enum
 from typing import Optional
-from datetime import datetime
+
+from pydantic import BaseModel, Field
+
+
+class Channel(str, Enum):
+    """Canais de mensagem suportados. Telegram hoje; WhatsApp depois."""
+
+    TELEGRAM = "telegram"
+    WHATSAPP = "whatsapp"
+
+
+class Role(str, Enum):
+    """Papel de um usuário dentro de uma organização."""
+
+    OWNER = "owner"
+    ADMIN = "admin"
+    MEMBER = "member"
+
+
+class ExpenseStatus(str, Enum):
+    """Ciclo de vida de um gasto.
+
+    PENDING_REVIEW: extraído pela IA, aguardando confirmação do usuário.
+    REGISTERED: confirmado e contabilizado.
+    (Estados de reembolso — SUBMITTED/APPROVED/... — chegam na Fase 2.)
+    """
+
+    PENDING_REVIEW = "pending_review"
+    REGISTERED = "registered"
+
+
+class Organization(BaseModel):
+    id: Optional[int] = None
+    name: str
+    created_at: Optional[datetime] = None
+
+
+class User(BaseModel):
+    id: Optional[int] = None
+    name: str
+    created_at: Optional[datetime] = None
+
+
+class ChannelIdentity(BaseModel):
+    """Vínculo entre um usuário interno e sua identidade em um canal.
+
+    Um mesmo `user_id` pode ter várias identidades (Telegram + WhatsApp).
+    O domínio nunca referencia `telegram_id` diretamente — sempre `user_id`.
+    """
+
+    id: Optional[int] = None
+    user_id: int
+    channel: Channel
+    external_id: str
+    created_at: Optional[datetime] = None
+
+
+class Membership(BaseModel):
+    id: Optional[int] = None
+    org_id: int
+    user_id: int
+    role: Role = Role.MEMBER
+    created_at: Optional[datetime] = None
+
+
+class Category(BaseModel):
+    id: Optional[int] = None
+    org_id: int
+    name: str
+
 
 class Expense(BaseModel):
-    user_id: int = Field(description="ID único do usuário do Telegram")
+    """Gasto. Sempre referencia `org_id` e `user_id` internos (nunca o id de canal)."""
+
+    id: Optional[int] = None
+    org_id: int
+    user_id: int
     store_name: str = Field(description="Nome do estabelecimento ou loja")
     total_amount: float = Field(description="Valor total da compra")
-    category: str = Field(description="Categoria do gasto (ex: Alimentação, Transporte, Lazer)")
-    date: str = Field(default_factory=lambda: datetime.now().strftime("%d/%m/%Y"), description="Data da compra")
-    payment_method: Optional[str] = Field(description="Método de pagamento (Crédito, Débito, Pix)")
-
-    class Config:
-        schema_extra = {
-            "example": {
-                "store_name": "Mercado Central",
-                "total_amount": 150.50,
-                "category": "Alimentação",
-                "date": "17/12/2023",
-                "payment_method": "Crédito"
-            }
-        }
+    category: str = Field(description="Categoria do gasto")
+    date: date_type = Field(description="Data da compra")
+    payment_method: Optional[str] = Field(
+        default=None, description="Método de pagamento (Crédito, Débito, Pix)"
+    )
+    status: ExpenseStatus = ExpenseStatus.PENDING_REVIEW
+    receipt_url: Optional[str] = Field(
+        default=None, description="Referência ao comprovante armazenado"
+    )
+    cost_center: Optional[str] = Field(
+        default=None, description="Centro de custo (base para reembolso/aprovação)"
+    )
+    created_at: Optional[datetime] = None
