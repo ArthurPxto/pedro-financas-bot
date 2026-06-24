@@ -99,13 +99,21 @@ docker compose up -d
 .venv/bin/python -m src.main
 ```
 ## 📝 User Commands
-    /start - Displays the welcome message and all bot functionalities.
 
-    /resumo - Shows total expenses for the last 30 days.
+**Gastos**
+- `/start` — welcome message + command list.
+- _(enviar foto de comprovante)_ — extração via IA → revisão (confirmar / editar categoria / editar centro de custo / excluir).
+- `/gasto <valor> <descrição>` — lança um gasto por texto (ex.: `/gasto 50 mercado almoço`).
+- `/listar` — últimos gastos registrados. `/resumo [meses]` — total do período.
 
-    /resumo [number] - Shows total expenses for the specified number of months (e.g., /resumo 3).
+**Equipe (Fase 1)**
+- `/criar_empresa <nome>` — cria uma empresa; você vira admin e recebe um código de convite.
+- `/entrar <código>` — entra numa empresa pelo código (como membro).
+- `/empresa` — empresa ativa + papel (e código, se admin). `/empresas`, `/trocar <id>` — alternar org ativa.
 
-    /listar - Lists the 5 most recent transactions registered in the database.
+**Categorias e centros de custo (admin)**
+- `/add_categoria <nome>`, `/categorias` — categorias da org (a IA sugere dentro delas).
+- `/add_centro <nome>`, `/centros` — centros de custo da org.
 
 ## 🤝 Contributing
 Contributions, issues, and feature requests are welcome! Feel free to check the issues page.

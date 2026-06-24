@@ -41,12 +41,18 @@ class ExpenseStatus(str, Enum):
 class Organization(BaseModel):
     id: Optional[int] = None
     name: str
+    join_code: Optional[str] = Field(
+        default=None, description="Código de convite para entrar na org (`/entrar <código>`)"
+    )
     created_at: Optional[datetime] = None
 
 
 class User(BaseModel):
     id: Optional[int] = None
     name: str
+    active_org_id: Optional[int] = Field(
+        default=None, description="Org em que os gastos deste usuário são lançados"
+    )
     created_at: Optional[datetime] = None
 
 
@@ -73,6 +79,14 @@ class Membership(BaseModel):
 
 
 class Category(BaseModel):
+    id: Optional[int] = None
+    org_id: int
+    name: str
+
+
+class CostCenter(BaseModel):
+    """Centro de custo definido pela organização (base para reembolso/relatórios)."""
+
     id: Optional[int] = None
     org_id: int
     name: str

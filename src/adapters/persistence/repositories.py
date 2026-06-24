@@ -11,14 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.adapters.persistence import models as m
 from src.core.entities import (
+    Category,
     Channel,
     ChannelIdentity,
+    CostCenter,
     Expense,
     Membership,
     Organization,
     User,
 )
 from src.core.ports.repositories import (
+    CategoryRepository,
+    CostCenterRepository,
     ExpenseRepository,
     MembershipRepository,
     OrganizationRepository,
@@ -30,11 +34,25 @@ from src.core.ports.repositories import (
 # --- Mappers ORM <-> domínio -------------------------------------------------
 
 def _to_user(row: m.UserModel) -> User:
-    return User(id=row.id, name=row.name, created_at=row.created_at)
+    return User(
+        id=row.id, name=row.name, active_org_id=row.active_org_id, created_at=row.created_at
+    )
 
 
 def _to_org(row: m.OrganizationModel) -> Organization:
-    return Organization(id=row.id, name=row.name, created_at=row.created_at)
+    return Organization(
+        id=row.id, name=row.name, join_code=row.join_code, created_at=row.created_at
+    )
+
+
+def _to_membership(row: m.MembershipModel) -> Membership:
+    return Membership(
+        id=row.id,
+        org_id=row.org_id,
+        user_id=row.user_id,
+        role=row.role,
+        created_at=row.created_at,
+    )
 
 
 def _to_expense(row: m.ExpenseModel) -> Expense:
@@ -74,11 +92,22 @@ class SqlAlchemyUserRepository(UserRepository):
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_user(row) if row else None
 
+    async def get(self, user_id: int) -> Optional[User]:
+        row = await self._session.get(m.UserModel, user_id)
+        return _to_user(row) if row else None
+
     async def add(self, user: User) -> User:
-        row = m.UserModel(name=user.name)
+        row = m.UserModel(name=user.name, active_org_id=user.active_org_id)
         self._session.add(row)
         await self._session.flush()
         return _to_user(row)
+
+    async def set_active_org(self, user_id: int, org_id: int) -> None:
+        row = await self._session.get(m.UserModel, user_id)
+        if row is None:
+            raise ValueError(f"User {user_id} não encontrado")
+        row.active_org_id = org_id
+        await self._session.flush()
 
     async def add_channel_identity(self, identity: ChannelIdentity) -> ChannelIdentity:
         row = m.ChannelIdentityModel(
@@ -102,10 +131,14 @@ class SqlAlchemyOrganizationRepository(OrganizationRepository):
         self._session = session
 
     async def add(self, org: Organization) -> Organization:
-        row = m.OrganizationModel(name=org.name)
+        row = m.OrganizationModel(name=org.name, join_code=org.join_code)
         self._session.add(row)
         await self._session.flush()
         return _to_org(row)
+
+    async def get(self, org_id: int) -> Optional[Organization]:
+        row = await self._session.get(m.OrganizationModel, org_id)
+        return _to_org(row) if row else None
 
     async def get_primary_for_user(self, user_id: int) -> Optional[Organization]:
         stmt = (
@@ -117,6 +150,23 @@ class SqlAlchemyOrganizationRepository(OrganizationRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_org(row) if row else None
+
+    async def get_by_join_code(self, join_code: str) -> Optional[Organization]:
+        stmt = select(m.OrganizationModel).where(
+            m.OrganizationModel.join_code == join_code
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_org(row) if row else None
+
+    async def list_for_user(self, user_id: int) -> list[Organization]:
+        stmt = (
+            select(m.OrganizationModel)
+            .join(m.MembershipModel, m.MembershipModel.org_id == m.OrganizationModel.id)
+            .where(m.MembershipModel.user_id == user_id)
+            .order_by(m.OrganizationModel.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_org(r) for r in rows]
 
 
 class SqlAlchemyMembershipRepository(MembershipRepository):
@@ -131,13 +181,55 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
         )
         self._session.add(row)
         await self._session.flush()
-        return Membership(
-            id=row.id,
-            org_id=row.org_id,
-            user_id=row.user_id,
-            role=row.role,
-            created_at=row.created_at,
+        return _to_membership(row)
+
+    async def get(self, org_id: int, user_id: int) -> Optional[Membership]:
+        stmt = select(m.MembershipModel).where(
+            m.MembershipModel.org_id == org_id,
+            m.MembershipModel.user_id == user_id,
         )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_membership(row) if row else None
+
+
+class SqlAlchemyCategoryRepository(CategoryRepository):
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    async def add(self, category: Category) -> Category:
+        row = m.CategoryModel(org_id=category.org_id, name=category.name)
+        self._session.add(row)
+        await self._session.flush()
+        return Category(id=row.id, org_id=row.org_id, name=row.name)
+
+    async def list_for_org(self, org_id: int) -> list[Category]:
+        stmt = (
+            select(m.CategoryModel)
+            .where(m.CategoryModel.org_id == org_id)
+            .order_by(m.CategoryModel.name.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [Category(id=r.id, org_id=r.org_id, name=r.name) for r in rows]
+
+
+class SqlAlchemyCostCenterRepository(CostCenterRepository):
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    async def add(self, cost_center: CostCenter) -> CostCenter:
+        row = m.CostCenterModel(org_id=cost_center.org_id, name=cost_center.name)
+        self._session.add(row)
+        await self._session.flush()
+        return CostCenter(id=row.id, org_id=row.org_id, name=row.name)
+
+    async def list_for_org(self, org_id: int) -> list[CostCenter]:
+        stmt = (
+            select(m.CostCenterModel)
+            .where(m.CostCenterModel.org_id == org_id)
+            .order_by(m.CostCenterModel.name.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [CostCenter(id=r.id, org_id=r.org_id, name=r.name) for r in rows]
 
 
 class SqlAlchemyExpenseRepository(ExpenseRepository):
@@ -226,6 +318,8 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.organizations = SqlAlchemyOrganizationRepository(self._session)
         self.memberships = SqlAlchemyMembershipRepository(self._session)
         self.expenses = SqlAlchemyExpenseRepository(self._session)
+        self.categories = SqlAlchemyCategoryRepository(self._session)
+        self.cost_centers = SqlAlchemyCostCenterRepository(self._session)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
