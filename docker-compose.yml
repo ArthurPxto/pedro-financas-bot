@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: pedro-financas-db
+    environment:
+      POSTGRES_USER: pedro
+      POSTGRES_PASSWORD: pedro
+      POSTGRES_DB: pedro_financas
+    ports:
+      - "5432:5432"
+    volumes:
+      - pedro_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pedro -d pedro_financas"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pedro_pgdata:

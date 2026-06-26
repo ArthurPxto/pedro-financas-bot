@@ -1,49 +1,59 @@
 # 💰 Pedro Finanças - AI-Powered Expense Tracker Bot
 
-A professional Telegram bot designed to simplify personal finance management for the everyday user. By leveraging **Multimodal AI (Gemini 2.5 Flash)**, the bot automatically extracts financial data from receipts, invoices, or banking screenshots and organizes them into a structured SQLite database.
+A multi-tenant expense bot. By leveraging **Multimodal AI (Gemini 2.5 Flash)**, it extracts financial data from receipts, invoices, or banking screenshots, lets the user **confirm before saving**, and stores each expense per organization/user in **PostgreSQL** — keeping the receipt image for audit. The messaging channel (Telegram today) sits behind a port, so adding WhatsApp later is a new adapter, not a rewrite.
 
 ---
 
 ## 🚀 Features
 
 * **Intelligent OCR & Context:** Uses Google Gemini to understand not just the text, but the context of the receipt (Store, Amount, Date, Category) directly from images.
-* **Multi-User Support:** Built-in SQLite database to manage expenses per Telegram user ID.
-* **Dynamic Reports:** * `/resumo`: Get a summary of the current month's spending.
-    * `/listar`: View a formatted list of the last 5 recorded expenses.
-* **Clean Architecture:** Decoupled code logic (Entities, Adapters, Core) for easy maintenance and scalability.
+* **Multi-Tenant:** Expenses scoped per organization/user in PostgreSQL; identity decoupled from the channel (`ChannelIdentity`), so one user can have Telegram + WhatsApp.
+* **Review before save:** AI extraction becomes a draft the user confirms (or cancels) via an interactive prompt; receipts are kept for audit.
+* **Dynamic Reports:** `/resumo` (monthly spending) and `/listar` (last 5 expenses).
+* **Hexagonal Architecture:** Ports & adapters — the core knows nothing about Telegram; new channels are new adapters.
 
 ---
 
-## 🏗️ Architecture & Clean Code
+## 🏗️ Architecture
 
-The project follows **Clean Architecture** principles to ensure that the business logic remains independent of external frameworks like the Telegram API or Google Cloud.
+The project follows **ports & adapters (hexagonal)**: the business core depends only on its own ports, adapters implement them, and the composition root (`main.py`) wires everything. The core never imports an adapter — adding a channel (WhatsApp) or swapping storage (S3) does not touch `core/`.
 
 
 
-### Project Structure:
+### Project Structure (ports & adapters):
 ```text
 ├── src/
-│   ├── core/           # Business Rules (Entities & Pydantic Models)
-│   ├── adapters/       # Interfaces (Gemini AI, SQLite Database, Telegram)
-│   └── main.py         # Application Entry Point & Orchestration
-├── .env                # API Keys (Not versioned)
-├── requirements.txt    # Project Dependencies
-└── README.md           # Documentation
-``` 
+│   ├── core/
+│   │   ├── entities.py     # Pure domain models (Org, User, ChannelIdentity, Expense…)
+│   │   ├── ports/          # Interfaces the core needs (messaging, repos, ai, storage)
+│   │   └── services/       # Channel-neutral business logic (OrgService, ExpenseService)
+│   ├── adapters/
+│   │   ├── ai_engine.py    # Gemini extractor
+│   │   ├── persistence/    # SQLAlchemy models + repositories + async engine
+│   │   ├── storage/        # Receipt storage (filesystem; S3 later)
+│   │   └── messaging/      # Telegram adapter (all python-telegram-bot lives here)
+│   ├── app.py              # Channel-neutral router (BotApplication)
+│   ├── config.py           # Boot-time config (pydantic-settings)
+│   └── main.py             # Composition root (wires adapters → services)
+├── alembic/                # Migrations (async, asyncpg)
+├── docker-compose.yml      # Local PostgreSQL
+└── requirements.txt
+```
 
 ## 🛠️ Tech Stack
 
-- Language: Python 3.10+
+- Language: Python 3.14
 - AI Engine: Google Generative AI (Gemini 2.5 Flash)
-- Data Validation: Pydantic (Strong typing for financial data)
-- Telegram Framework: python-telegram-bot (Async version)
-- Database: SQLite (Relational storage for multi-user support)
+- Data Validation & Config: Pydantic / pydantic-settings
+- Telegram Framework: python-telegram-bot (async)
+- Database: PostgreSQL + SQLAlchemy (async / asyncpg) + Alembic
+- Logging: structlog
 
 ## 🚀 Features
 
 - Intelligent OCR: Uses Google Gemini to understand context (Store, Amount, Date, Category) directly from images.
 
-- Multi-User Support: Database schema designed to associate expenses with specific Telegram User IDs.
+- Multi-Tenant: Org/User domain model; expenses reference an internal user_id, never a raw Telegram ID.
 
 - Financial Reports: 
     * /resumo: Monthly spending summary.
@@ -54,32 +64,39 @@ The project follows **Clean Architecture** principles to ensure that the busines
 ## ⚙️ How to Run
 
  ### 1. Prerequisites
-    - Python 3.10 or higher installed.
+    - Python 3.14, `uv`, and Docker (for local PostgreSQL).
 
     - A Telegram Bot Token (obtained from @BotFather).
 
     - A Google AI Studio API Key (Gemini API).
 
-### 2. Installation 
+### 2. Installation
 Clone the repository and install the required packages:
 
 ```bash
-    git clone [https://github.com/your-username/pedro-financas-bot.git](https:/github.com/your-username/pedro-financas-bot.git)
+git clone https://github.com/your-username/pedro-financas-bot.git
 cd pedro-financas-bot
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+uv venv --python 3.14 .venv
+uv pip install -r requirements.txt --python .venv
 ```
 
 ### 3. Configuration
-Create a .env file in the root directory with your credentials:
-```text
-TELEGRAM_TOKEN=your_telegram_bot_token_here
-GEMINI_API_KEY=your_google_gemini_key_here
-```
-### 4. Running the application
+Copy `.env.example` to `.env` and fill in your credentials:
 ```bash
-python -m src.main
+cp .env.example .env
+# edit TELEGRAM_TOKEN and GEMINI_API_KEY
+```
+
+### 4. Database
+Start PostgreSQL and apply migrations:
+```bash
+docker compose up -d
+.venv/bin/alembic upgrade head
+```
+
+### 5. Running the application
+```bash
+.venv/bin/python -m src.main
 ```
 ## 📝 User Commands
     /start - Displays the welcome message and all bot functionalities.
