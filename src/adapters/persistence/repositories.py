@@ -18,6 +18,8 @@ from src.core.entities import (
     Expense,
     ExpenseStatus,
     Membership,
+    NotaDebito,
+    NotaStatus,
     Organization,
     User,
 )
@@ -26,34 +28,60 @@ from src.core.ports.repositories import (
     CostCenterRepository,
     ExpenseRepository,
     MembershipRepository,
+    NotaRepository,
     OrganizationRepository,
     UnitOfWork,
     UserRepository,
 )
 
 
-# Estados que contam como gasto "real" nos relatórios (/resumo, /listar):
-# confirmado pelo autor e ainda não rejeitado. Rascunho e rejeitado ficam de fora.
-_COUNTED_STATUSES = (
-    ExpenseStatus.SUBMITTED,
-    ExpenseStatus.APPROVED,
-    ExpenseStatus.REIMBURSED,
-)
-# Estados pós-confirmação — a visão "meus reembolsos" mostra todos eles.
-_REIMBURSEMENT_STATUSES = _COUNTED_STATUSES + (ExpenseStatus.REJECTED,)
+# Um gasto "real" nos relatórios é o confirmado (item de nota). Rascunho fica fora.
+_COUNTED_STATUSES = (ExpenseStatus.CONFIRMED,)
 
 
 # --- Mappers ORM <-> domínio -------------------------------------------------
 
 def _to_user(row: m.UserModel) -> User:
     return User(
-        id=row.id, name=row.name, active_org_id=row.active_org_id, created_at=row.created_at
+        id=row.id,
+        name=row.name,
+        active_org_id=row.active_org_id,
+        cpf=row.cpf,
+        bank_name=row.bank_name,
+        bank_agency=row.bank_agency,
+        bank_account=row.bank_account,
+        pix_key=row.pix_key,
+        created_at=row.created_at,
     )
 
 
 def _to_org(row: m.OrganizationModel) -> Organization:
     return Organization(
-        id=row.id, name=row.name, join_code=row.join_code, created_at=row.created_at
+        id=row.id,
+        name=row.name,
+        join_code=row.join_code,
+        cnpj=row.cnpj,
+        address=row.address,
+        cep=row.cep,
+        created_at=row.created_at,
+    )
+
+
+def _to_nota(row: m.NotaDebitoModel) -> NotaDebito:
+    return NotaDebito(
+        id=row.id,
+        org_id=row.org_id,
+        user_id=row.user_id,
+        numero=row.numero,
+        competencia=row.competencia,
+        status=row.status,
+        vencimento=row.vencimento,
+        outras_retencoes=row.outras_retencoes,
+        observacoes=row.observacoes,
+        approver_id=row.approver_id,
+        decision_comment=row.decision_comment,
+        decided_at=row.decided_at,
+        created_at=row.created_at,
     )
 
 
@@ -90,9 +118,7 @@ def _to_expense(row: m.ExpenseModel) -> Expense:
         status=row.status,
         receipt_url=row.receipt_url,
         cost_center=row.cost_center,
-        approver_id=row.approver_id,
-        decision_comment=row.decision_comment,
-        decided_at=row.decided_at,
+        nota_id=row.nota_id,
         created_at=row.created_at,
     )
 
@@ -134,6 +160,18 @@ class SqlAlchemyUserRepository(UserRepository):
         row.active_org_id = org_id
         await self._session.flush()
 
+    async def update_fiscal(self, user: User) -> User:
+        row = await self._session.get(m.UserModel, user.id)
+        if row is None:
+            raise ValueError(f"User {user.id} não encontrado")
+        row.cpf = user.cpf
+        row.bank_name = user.bank_name
+        row.bank_agency = user.bank_agency
+        row.bank_account = user.bank_account
+        row.pix_key = user.pix_key
+        await self._session.flush()
+        return _to_user(row)
+
     async def add_channel_identity(self, identity: ChannelIdentity) -> ChannelIdentity:
         row = m.ChannelIdentityModel(
             user_id=identity.user_id,
@@ -168,6 +206,16 @@ class SqlAlchemyOrganizationRepository(OrganizationRepository):
     async def get(self, org_id: int) -> Optional[Organization]:
         row = await self._session.get(m.OrganizationModel, org_id)
         return _to_org(row) if row else None
+
+    async def update_fiscal(self, org: Organization) -> Organization:
+        row = await self._session.get(m.OrganizationModel, org.id)
+        if row is None:
+            raise ValueError(f"Org {org.id} não encontrada")
+        row.cnpj = org.cnpj
+        row.address = org.address
+        row.cep = org.cep
+        await self._session.flush()
+        return _to_org(row)
 
     async def get_primary_for_user(self, user_id: int) -> Optional[Organization]:
         stmt = (
@@ -286,6 +334,7 @@ class SqlAlchemyExpenseRepository(ExpenseRepository):
             status=expense.status,
             receipt_url=expense.receipt_url,
             cost_center=expense.cost_center,
+            nota_id=expense.nota_id,
         )
         self._session.add(row)
         await self._session.flush()
@@ -307,9 +356,7 @@ class SqlAlchemyExpenseRepository(ExpenseRepository):
         row.status = expense.status
         row.receipt_url = expense.receipt_url
         row.cost_center = expense.cost_center
-        row.approver_id = expense.approver_id
-        row.decision_comment = expense.decision_comment
-        row.decided_at = expense.decided_at
+        row.nota_id = expense.nota_id
         await self._session.flush()
         return _to_expense(row)
 
@@ -341,30 +388,11 @@ class SqlAlchemyExpenseRepository(ExpenseRepository):
         )
         return float((await self._session.execute(stmt)).scalar_one())
 
-    async def list_pending_for_org(self, org_id: int) -> list[Expense]:
+    async def list_for_nota(self, nota_id: int) -> list[Expense]:
         stmt = (
             select(m.ExpenseModel)
-            .where(
-                m.ExpenseModel.org_id == org_id,
-                m.ExpenseModel.status == ExpenseStatus.SUBMITTED,
-            )
-            .order_by(m.ExpenseModel.id.asc())
-        )
-        rows = (await self._session.execute(stmt)).scalars().all()
-        return [_to_expense(r) for r in rows]
-
-    async def list_for_reimbursements(
-        self, org_id: int, user_id: int, limit: int = 10
-    ) -> list[Expense]:
-        stmt = (
-            select(m.ExpenseModel)
-            .where(
-                m.ExpenseModel.org_id == org_id,
-                m.ExpenseModel.user_id == user_id,
-                m.ExpenseModel.status.in_(_REIMBURSEMENT_STATUSES),
-            )
-            .order_by(m.ExpenseModel.id.desc())
-            .limit(limit)
+            .where(m.ExpenseModel.nota_id == nota_id)
+            .order_by(m.ExpenseModel.date_at.asc(), m.ExpenseModel.id.asc())
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_expense(r) for r in rows]
@@ -379,6 +407,7 @@ class SqlAlchemyExpenseRepository(ExpenseRepository):
         category=None,
         cost_center=None,
         user_id=None,
+        nota_status=None,
     ):
         conditions = [m.ExpenseModel.org_id == org_id]
         conditions.append(m.ExpenseModel.status.in_(statuses or _COUNTED_STATUSES))
@@ -392,13 +421,105 @@ class SqlAlchemyExpenseRepository(ExpenseRepository):
             conditions.append(m.ExpenseModel.cost_center == cost_center)
         if user_id is not None:
             conditions.append(m.ExpenseModel.user_id == user_id)
-        stmt = (
-            select(m.ExpenseModel)
-            .where(*conditions)
-            .order_by(m.ExpenseModel.date_at.desc(), m.ExpenseModel.id.desc())
+        stmt = select(m.ExpenseModel)
+        if nota_status is not None:
+            # Só itens cujas notas estão no estado pedido (ex.: aprovada/paga).
+            stmt = stmt.join(m.NotaDebitoModel, m.ExpenseModel.nota_id == m.NotaDebitoModel.id)
+            conditions.append(m.NotaDebitoModel.status == nota_status)
+        stmt = stmt.where(*conditions).order_by(
+            m.ExpenseModel.date_at.desc(), m.ExpenseModel.id.desc()
         )
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_expense(r) for r in rows]
+
+
+class SqlAlchemyNotaRepository(NotaRepository):
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    async def add(self, nota: NotaDebito) -> NotaDebito:
+        row = m.NotaDebitoModel(
+            org_id=nota.org_id,
+            user_id=nota.user_id,
+            numero=nota.numero,
+            competencia=nota.competencia,
+            status=nota.status,
+            vencimento=nota.vencimento,
+            outras_retencoes=nota.outras_retencoes,
+            observacoes=nota.observacoes,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return _to_nota(row)
+
+    async def get(self, nota_id: int) -> Optional[NotaDebito]:
+        row = await self._session.get(m.NotaDebitoModel, nota_id)
+        return _to_nota(row) if row else None
+
+    async def get_open_for_user(self, org_id: int, user_id: int) -> Optional[NotaDebito]:
+        stmt = select(m.NotaDebitoModel).where(
+            m.NotaDebitoModel.org_id == org_id,
+            m.NotaDebitoModel.user_id == user_id,
+            m.NotaDebitoModel.status == NotaStatus.ABERTA,
+        )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_nota(row) if row else None
+
+    async def next_numero(self, org_id: int) -> int:
+        stmt = select(func.coalesce(func.max(m.NotaDebitoModel.numero), 0)).where(
+            m.NotaDebitoModel.org_id == org_id
+        )
+        return int((await self._session.execute(stmt)).scalar_one()) + 1
+
+    async def list_for_user(self, org_id: int, user_id: int, limit: int = 20) -> list[NotaDebito]:
+        stmt = (
+            select(m.NotaDebitoModel)
+            .where(
+                m.NotaDebitoModel.org_id == org_id,
+                m.NotaDebitoModel.user_id == user_id,
+            )
+            .order_by(m.NotaDebitoModel.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_nota(r) for r in rows]
+
+    async def list_pending_for_org(self, org_id: int) -> list[NotaDebito]:
+        stmt = (
+            select(m.NotaDebitoModel)
+            .where(
+                m.NotaDebitoModel.org_id == org_id,
+                m.NotaDebitoModel.status == NotaStatus.FECHADA,
+            )
+            .order_by(m.NotaDebitoModel.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_nota(r) for r in rows]
+
+    async def list_for_org(self, org_id: int, limit: int = 50) -> list[NotaDebito]:
+        stmt = (
+            select(m.NotaDebitoModel)
+            .where(m.NotaDebitoModel.org_id == org_id)
+            .order_by(m.NotaDebitoModel.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_nota(r) for r in rows]
+
+    async def update(self, nota: NotaDebito) -> NotaDebito:
+        row = await self._session.get(m.NotaDebitoModel, nota.id)
+        if row is None:
+            raise ValueError(f"Nota {nota.id} não encontrada")
+        row.numero = nota.numero
+        row.status = nota.status
+        row.vencimento = nota.vencimento
+        row.outras_retencoes = nota.outras_retencoes
+        row.observacoes = nota.observacoes
+        row.approver_id = nota.approver_id
+        row.decision_comment = nota.decision_comment
+        row.decided_at = nota.decided_at
+        await self._session.flush()
+        return _to_nota(row)
 
 
 # --- Unit of Work ------------------------------------------------------------
@@ -420,6 +541,7 @@ class SqlAlchemyUnitOfWork(UnitOfWork):
         self.expenses = SqlAlchemyExpenseRepository(self._session)
         self.categories = SqlAlchemyCategoryRepository(self._session)
         self.cost_centers = SqlAlchemyCostCenterRepository(self._session)
+        self.notas = SqlAlchemyNotaRepository(self._session)
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:

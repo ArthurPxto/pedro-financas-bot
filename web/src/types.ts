@@ -25,5 +25,14 @@ export interface ReportOverview {
 export interface ReportFilters {
   from?: string; // YYYY-MM-DD
   to?: string; // YYYY-MM-DD
-  status?: string; // valor único do enum, ou "" para os contabilizados
+  status?: string; // status da nota (aberta/fechada/aprovada/rejeitada/paga) ou ""
+}
+
+export interface NotaSummary {
+  id: number;
+  numero: number | null;
+  competencia: string; // YYYY-MM-DD (1º do mês de competência)
+  status: string;
+  vencimento: string | null;
+  author: string;
 }

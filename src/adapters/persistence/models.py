@@ -8,17 +8,19 @@ from datetime import date, datetime
 from enum import Enum as PyEnum
 
 from sqlalchemy import (
+    Date,
     DateTime,
     Enum as SAEnum,
     Float,
     ForeignKey,
+    Integer,
     String,
     UniqueConstraint,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from src.core.entities import Channel, ExpenseStatus, Role
+from src.core.entities import Channel, ExpenseStatus, NotaStatus, Role
 
 
 def _enum(py_enum: type[PyEnum], name: str) -> SAEnum:
@@ -38,6 +40,9 @@ class OrganizationModel(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
     join_code: Mapped[str | None] = mapped_column(String(32), unique=True, nullable=True)
+    cnpj: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    address: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    cep: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -50,6 +55,11 @@ class UserModel(Base):
     name: Mapped[str] = mapped_column(String(255))
     # Sem FK rígida para evitar dependência circular de criação (usuário ⇄ org pessoal).
     active_org_id: Mapped[int | None] = mapped_column(nullable=True)
+    cpf: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bank_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    bank_agency: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    bank_account: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    pix_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -134,8 +144,33 @@ class ExpenseModel(Base):
     )
     receipt_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     cost_center: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Decisão de aprovação (Fase 2). Sem FK rígida em approver_id para manter o
-    # padrão leve das outras colunas de usuário; o app garante org/role.
+    # Nota de débito à qual o gasto pertence (item da nota) — Fase 5.
+    nota_id: Mapped[int | None] = mapped_column(
+        ForeignKey("notas_debito.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class NotaDebitoModel(Base):
+    __tablename__ = "notas_debito"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(
+        ForeignKey("organizations.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    numero: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    competencia: Mapped[date] = mapped_column(Date)
+    status: Mapped[NotaStatus] = mapped_column(
+        _enum(NotaStatus, "nota_status_enum"), default=NotaStatus.ABERTA, index=True
+    )
+    vencimento: Mapped[date | None] = mapped_column(Date, nullable=True)
+    outras_retencoes: Mapped[float] = mapped_column(Float, default=0.0)
+    observacoes: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     approver_id: Mapped[int | None] = mapped_column(nullable=True)
     decision_comment: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     decided_at: Mapped[datetime | None] = mapped_column(

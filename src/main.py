@@ -14,6 +14,7 @@ from src.app import BotApplication
 from src.config import get_settings
 from src.core.services.auth_service import AuthService
 from src.core.services.expense_service import ExpenseService
+from src.core.services.nota_service import NotaService
 from src.core.services.org_service import OrgService
 from src.logging_config import configure_logging, get_logger
 
@@ -40,6 +41,7 @@ def main() -> None:
     # Serviços (núcleo)
     org_service = OrgService(uow_factory)
     expense_service = ExpenseService(uow_factory, extractor, receipts)
+    nota_service = NotaService(uow_factory)
 
     # Auth do painel web (opcional): habilita o /login no bot se houver segredo.
     auth_service = (
@@ -51,6 +53,7 @@ def main() -> None:
     app = BotApplication(
         org_service,
         expense_service,
+        nota_service,
         notifier=channel,
         auth_service=auth_service,
         web_base_url=settings.web_base_url,

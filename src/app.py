@@ -1,47 +1,55 @@
 """Roteador de aplicação — cola neutra de canal entre o port de mensagens e os serviços.
 
 Implementa a assinatura `MessageHandler`: recebe `IncomingMessage` + `ChannelResponder`
-e orquestra `OrgService`/`ExpenseService`. Não conhece Telegram nem WhatsApp — só fala
-em termos de mensagens normalizadas e prompts interativos abstratos.
+e orquestra `OrgService`/`ExpenseService`/`NotaService`. Não conhece Telegram nem
+WhatsApp — só fala em termos de mensagens normalizadas e prompts interativos abstratos.
+
+A partir da Fase 5 o ciclo de reembolso pertence à **nota de débito**: gastos
+confirmados viram itens da nota aberta; a nota é fechada e aprovada/paga como unidade.
 """
-from src.core.entities import Expense, ExpenseStatus, Role
+import re
+from datetime import date
+from typing import Optional
+
+from src.core.entities import Expense, NotaDebito, NotaStatus, Role
 from src.core.ports.messaging import (
     ChannelResponder,
     IncomingMessage,
     InteractivePrompt,
     PromptAction,
 )
-from typing import Optional
-
 from src.core.ports.notifications import Notifier
 from src.core.services.auth_service import AuthService
 from src.core.services.expense_service import ExpenseService
+from src.core.services.nota_service import NotaService, valor_a_pagar
 from src.core.services.org_service import OrgService, UserContext
 from src.logging_config import get_logger
 
 log = get_logger(__name__)
 
 # Chaves de ação neutras devolvidas pelos prompts (cabem nos 64 bytes do Telegram).
-# Formato: "<verbo>:<expense_id>[:<índice>]".
 _CONFIRM = "exp_ok"
 _DELETE = "exp_no"
 _OPEN_CAT = "exp_cat"   # abre o seletor de categoria
 _OPEN_CC = "exp_cc"     # abre o seletor de centro de custo
 _SET_CAT = "setcat"     # setcat:<id>:<idx>
 _SET_CC = "setcc"       # setcc:<id>:<idx>
-_APV_OK = "apv_ok"      # aprova um gasto:        apv_ok:<id>
-_APV_NO = "apv_no"      # inicia rejeição:        apv_no:<id>
-_APV_ALL = "apv_all"    # aprova todos pendentes
-_APV_REIMB = "apv_reimb"  # marca reembolsado:    apv_reimb:<id>
+_NT_CLOSE = "nt_close"  # fecha e envia a nota:    nt_close:<id>
+_NT_OK = "nt_ok"        # aprova a nota:           nt_ok:<id>
+_NT_NO = "nt_no"        # inicia rejeição da nota: nt_no:<id>
+_NT_PAY = "nt_pay"      # marca a nota como paga:  nt_pay:<id>
 
-# Rótulos amigáveis (PT) de cada estado, para a visão "meus reembolsos".
-_STATUS_LABELS = {
-    ExpenseStatus.PENDING_REVIEW: "📝 rascunho",
-    ExpenseStatus.SUBMITTED: "⏳ aguardando aprovação",
-    ExpenseStatus.APPROVED: "✅ aprovado",
-    ExpenseStatus.REJECTED: "❌ rejeitado",
-    ExpenseStatus.REIMBURSED: "💸 reembolsado",
+_NOTA_LABELS = {
+    NotaStatus.ABERTA: "📂 aberta",
+    NotaStatus.FECHADA: "⏳ aguardando aprovação",
+    NotaStatus.APROVADA: "✅ aprovada",
+    NotaStatus.REJEITADA: "❌ rejeitada",
+    NotaStatus.PAGA: "💸 paga",
 }
+_MESES = [
+    "janeiro", "fevereiro", "março", "abril", "maio", "junho",
+    "julho", "agosto", "setembro", "outubro", "novembro", "dezembro",
+]
 
 
 class BotApplication:
@@ -49,12 +57,14 @@ class BotApplication:
         self,
         org_service: OrgService,
         expense_service: ExpenseService,
+        nota_service: NotaService,
         notifier: Notifier,
         auth_service: Optional[AuthService] = None,
         web_base_url: str = "",
     ):
         self._org = org_service
         self._expenses = expense_service
+        self._notas = nota_service
         self._notifier = notifier
         self._auth = auth_service
         self._web_base_url = web_base_url.rstrip("/")
@@ -63,7 +73,6 @@ class BotApplication:
         ctx = await self._org.resolve_context(
             message.channel, message.external_user_id, message.sender_name
         )
-
         if message.action:
             await self._handle_action(ctx, message.action, responder)
         elif message.media:
@@ -94,12 +103,15 @@ class BotApplication:
             "add_categoria": lambda: self._add_category(ctx, rest, responder),
             "centros": lambda: self._list_cost_centers(ctx, responder),
             "add_centro": lambda: self._add_cost_center(ctx, rest, responder),
-            "aprovacoes": lambda: self._list_approvals(ctx, responder),
-            "aprovar": lambda: self._approve_command(ctx, rest, responder),
-            "aprovar_todos": lambda: self._approve_all(ctx, responder),
-            "rejeitar": lambda: self._reject_command(ctx, rest, responder),
-            "reembolsar": lambda: self._reimburse_command(ctx, rest, responder),
-            "reembolsos": lambda: self._my_reimbursements(ctx, responder),
+            "nota": lambda: self._show_nota(ctx, rest, responder),
+            "notas": lambda: self._list_notas(ctx, responder),
+            "nota_fechar": lambda: self._close_current_nota(ctx, responder),
+            "aprovacoes": lambda: self._list_pending_notas(ctx, responder),
+            "nota_aprovar": lambda: self._approve_nota_cmd(ctx, rest, responder),
+            "nota_rejeitar": lambda: self._reject_nota_cmd(ctx, rest, responder),
+            "nota_pagar": lambda: self._pay_nota_cmd(ctx, rest, responder),
+            "meus_dados": lambda: self._my_data(ctx, rest, responder),
+            "empresa_dados": lambda: self._org_data(ctx, rest, responder),
             "login": lambda: self._web_login(ctx, responder),
         }
         handler = handlers.get(command)
@@ -107,8 +119,8 @@ class BotApplication:
             await handler()
         else:
             await responder.send_text(
-                "Envie a foto de um comprovante, ou use /gasto, /resumo, /listar, "
-                "/empresa ou /start."
+                "Envie a foto de um comprovante, ou use /gasto, /nota, /notas, "
+                "/resumo, /empresa ou /start."
             )
 
     # --- Onboarding ----------------------------------------------------------
@@ -122,7 +134,7 @@ class BotApplication:
             f"🏢 Empresa *{org.name}* criada! Você é admin.\n"
             f"Código de convite: `{org.join_code}`\n"
             f"Compartilhe com a equipe: cada pessoa envia `/entrar {org.join_code}`.\n\n"
-            f"Seus gastos agora vão para esta empresa."
+            f"Seus gastos agora vão para esta empresa. Defina os dados fiscais com /empresa_dados."
         )
 
     async def _join_org(self, ctx, code, responder) -> None:
@@ -204,7 +216,7 @@ class BotApplication:
             else "Apenas admins podem gerenciar centros de custo."
         )
 
-    # --- Gastos --------------------------------------------------------------
+    # --- Gastos (rascunho → item da nota) -----------------------------------
 
     async def _manual_expense(self, ctx, rest, responder) -> None:
         amount_str, _, description = rest.partition(" ")
@@ -256,33 +268,26 @@ class BotApplication:
             await self._open_picker(ctx, _to_int(args), responder, kind="cc")
         elif verb in (_SET_CAT, _SET_CC):
             await self._apply_picker(ctx, verb, args, responder)
-        elif verb == _APV_OK:
-            await self._approve_one(ctx, _to_int(args), responder)
-        elif verb == _APV_NO:
-            await self._prompt_reject(ctx, _to_int(args), responder)
-        elif verb == _APV_ALL:
-            await self._approve_all(ctx, responder)
-        elif verb == _APV_REIMB:
-            await self._reimburse(ctx, _to_int(args), responder)
-
-    # --- Confirmação do rascunho (entra no fluxo de reembolso) ---------------
+        elif verb == _NT_CLOSE:
+            await self._close_nota(ctx, _to_int(args), responder)
+        elif verb == _NT_OK:
+            await self._approve_nota(ctx, _to_int(args), responder)
+        elif verb == _NT_NO:
+            await self._prompt_reject_nota(ctx, _to_int(args), responder)
+        elif verb == _NT_PAY:
+            await self._pay_nota(ctx, _to_int(args), responder)
 
     async def _confirm_draft(self, ctx, expense_id, responder) -> None:
-        # Quem já é aprovador (uso pessoal / admin) não precisa de fila: aprova direto.
-        approve_directly = await self._org.is_admin(ctx)
-        saved = await self._expenses.confirm(
-            ctx, expense_id, approve_directly=approve_directly
-        )
-        if saved is None:
+        result = await self._expenses.confirm(ctx, expense_id)
+        if result is None:
             await responder.send_text("Não encontrei esse rascunho para confirmar.")
-        elif saved.status == ExpenseStatus.APPROVED:
-            await responder.send_text(f"✅ Gasto registrado!\n{self._format_expense(saved)}")
-        else:  # SUBMITTED — aguardando um aprovador
-            await responder.send_text(
-                f"📤 Gasto enviado para aprovação!\n{self._format_expense(saved)}\n\n"
-                "Acompanhe o status em /reembolsos."
-            )
-            await self._notify_approvers(ctx)
+            return
+        expense, nota = result
+        await responder.send_text(
+            f"✅ Adicionado à sua nota de débito de {self._competencia(nota)}.\n"
+            f"{self._format_expense(expense)}\n\n"
+            "Veja a nota em /nota. Quando terminar o mês, feche com /nota_fechar."
+        )
 
     async def _open_picker(self, ctx, expense_id, responder, *, kind: str) -> None:
         if expense_id is None or await self._expenses.get_draft(ctx, expense_id) is None:
@@ -329,132 +334,210 @@ class BotApplication:
         if updated is None:
             await responder.send_text("Esse rascunho não está mais disponível para edição.")
             return
-        # Reapresenta o rascunho atualizado para o usuário continuar ou confirmar.
         await self._send_draft_prompt(ctx, updated, responder)
 
-    # --- Aprovação / reembolso ----------------------------------------------
+    # --- Nota de débito (autor) ---------------------------------------------
 
-    async def _list_approvals(self, ctx, responder) -> None:
-        if not await self._require_approver(ctx, responder):
-            return
-        pending = await self._expenses.list_pending_approvals(ctx)
-        if not pending:
-            await responder.send_text("✅ Nenhum gasto aguardando aprovação.")
-            return
-        await responder.send_text(f"📋 {len(pending)} gasto(s) aguardando aprovação:")
-        for e in pending:
-            await responder.send_prompt(
-                InteractivePrompt(
-                    text=await self._format_approval_item(e),
-                    actions=[
-                        PromptAction(f"{_APV_OK}:{e.id}", "✅ Aprovar"),
-                        PromptAction(f"{_APV_NO}:{e.id}", "❌ Rejeitar"),
-                    ],
+    async def _show_nota(self, ctx, arg, responder) -> None:
+        is_admin = await self._org.is_admin(ctx)
+        if arg.strip():
+            nota_id = _to_int(arg)
+            if nota_id is None:
+                await responder.send_text("Use: /nota (nota aberta) ou /nota <id>")
+                return
+            result = await self._notas.get_with_items(ctx, nota_id, include_others=is_admin)
+        else:
+            nota = await self._notas.current_open(ctx)
+            if nota is None:
+                await responder.send_text(
+                    "Você não tem nota aberta. Envie um comprovante ou use /gasto para começar uma."
                 )
-            )
-        if len(pending) > 1:
-            await responder.send_prompt(
-                InteractivePrompt(
-                    text="Ou aprove todos de uma vez:",
-                    actions=[PromptAction(_APV_ALL, f"✅ Aprovar todos ({len(pending)})")],
-                )
-            )
-
-    async def _approve_command(self, ctx, rest, responder) -> None:
-        expense_id = _to_int(rest)
-        if expense_id is None:
-            await responder.send_text("Use: /aprovar <id> (veja /aprovacoes)")
+                return
+            result = await self._notas.get_with_items(ctx, nota.id)
+        if result is None:
+            await responder.send_text("Nota não encontrada.")
             return
-        await self._approve_one(ctx, expense_id, responder)
+        nota, items = result
+        author = await self._org.user_name(nota.user_id) if is_admin else None
+        await self._send_nota(nota, items, responder, is_admin=is_admin, author=author)
 
-    async def _approve_one(self, ctx, expense_id, responder) -> None:
-        if not await self._require_approver(ctx, responder):
+    async def _list_notas(self, ctx, responder) -> None:
+        notas = await self._notas.list_for_user(ctx)
+        if not notas:
+            await responder.send_text("Você ainda não tem notas de débito. Comece lançando um gasto.")
             return
-        saved = await self._expenses.approve(ctx, expense_id)
+        lines = ["🧾 Suas notas de débito (use /nota <id>):\n"]
+        for n in notas:
+            num = f"#{n.numero}" if n.numero else "(rascunho)"
+            lines.append(f"[{n.id}] {num} {self._competencia(n)} — {_NOTA_LABELS[n.status]}")
+        await responder.send_text("\n".join(lines))
+
+    async def _close_current_nota(self, ctx, responder) -> None:
+        nota = await self._notas.current_open(ctx)
+        if nota is None:
+            await responder.send_text("Você não tem nota aberta para fechar.")
+            return
+        await self._close_nota(ctx, nota.id, responder)
+
+    async def _close_nota(self, ctx, nota_id, responder) -> None:
+        if nota_id is None:
+            return
+        result = await self._notas.get_with_items(ctx, nota_id)
+        if result is None:
+            await responder.send_text("Nota não encontrada.")
+            return
+        nota, items = result
+        if nota.status != NotaStatus.ABERTA:
+            await responder.send_text("Essa nota já foi fechada.")
+            return
+        if not items:
+            await responder.send_text("Sua nota está vazia. Adicione ao menos um gasto antes de fechar.")
+            return
+        is_admin = await self._org.is_admin(ctx)
+        saved = await self._notas.close(ctx, nota_id, approve_directly=is_admin)
         if saved is None:
-            await responder.send_text("Esse gasto não está mais aguardando aprovação.")
+            await responder.send_text("Não consegui fechar a nota.")
             return
-        await responder.send_text(f"✅ Gasto #{saved.id} aprovado.\n{self._format_expense(saved)}")
+        if saved.status == NotaStatus.APROVADA:
+            await responder.send_text(
+                f"✅ Nota de débito #{saved.numero} fechada e aprovada (você é aprovador)."
+            )
+        else:
+            await responder.send_text(
+                f"📤 Nota de débito #{saved.numero} fechada e enviada para aprovação.\n"
+                f"Vencimento: {saved.vencimento.strftime('%d/%m/%Y')}. Acompanhe em /notas."
+            )
+            await self._notify_approvers(ctx)
+
+    # --- Nota de débito (aprovador) -----------------------------------------
+
+    async def _list_pending_notas(self, ctx, responder) -> None:
+        if not await self._require_approver(ctx, responder):
+            return
+        pending = await self._notas.list_pending(ctx)
+        if not pending:
+            await responder.send_text("✅ Nenhuma nota aguardando aprovação.")
+            return
+        await responder.send_text(f"📋 {len(pending)} nota(s) aguardando aprovação:")
+        for nota in pending:
+            result = await self._notas.get_with_items(ctx, nota.id, include_others=True)
+            if result is None:
+                continue
+            n, items = result
+            author = await self._org.user_name(n.user_id)
+            await self._send_nota(n, items, responder, is_admin=True, author=author)
+
+    async def _approve_nota_cmd(self, ctx, rest, responder) -> None:
+        nota_id = _to_int(rest)
+        if nota_id is None:
+            await responder.send_text("Use: /nota_aprovar <id> (veja /aprovacoes)")
+            return
+        await self._approve_nota(ctx, nota_id, responder)
+
+    async def _approve_nota(self, ctx, nota_id, responder) -> None:
+        if not await self._require_approver(ctx, responder):
+            return
+        saved = await self._notas.approve(ctx, nota_id)
+        if saved is None:
+            await responder.send_text("Essa nota não está mais aguardando aprovação.")
+            return
+        await responder.send_text(f"✅ Nota de débito #{saved.numero} aprovada.")
         await self._notify_author(
-            ctx, saved, f"✅ Seu gasto em {saved.store_name} (R$ {saved.total_amount:.2f}) foi aprovado."
+            ctx, saved, f"✅ Sua nota de débito #{saved.numero} foi aprovada."
         )
 
-    async def _approve_all(self, ctx, responder) -> None:
+    async def _prompt_reject_nota(self, ctx, nota_id, responder) -> None:
         if not await self._require_approver(ctx, responder):
             return
-        approved = await self._expenses.approve_all(ctx)
-        if not approved:
-            await responder.send_text("Nenhum gasto aguardando aprovação.")
-            return
-        await responder.send_text(f"✅ {len(approved)} gasto(s) aprovado(s).")
-        for e in approved:
-            await self._notify_author(
-                ctx, e, f"✅ Seu gasto em {e.store_name} (R$ {e.total_amount:.2f}) foi aprovado."
-            )
-
-    async def _prompt_reject(self, ctx, expense_id, responder) -> None:
-        # A rejeição exige motivo; como o fluxo é stateless, pedimos via comando.
-        if not await self._require_approver(ctx, responder):
-            return
-        if expense_id is None:
+        if nota_id is None:
             return
         await responder.send_text(
-            f"Para rejeitar o gasto #{expense_id}, envie o motivo:\n"
-            f"/rejeitar {expense_id} <motivo>"
+            f"Para rejeitar a nota #{nota_id}, envie o motivo:\n/nota_rejeitar {nota_id} <motivo>"
         )
 
-    async def _reject_command(self, ctx, rest, responder) -> None:
+    async def _reject_nota_cmd(self, ctx, rest, responder) -> None:
         if not await self._require_approver(ctx, responder):
             return
         id_str, _, comment = rest.partition(" ")
-        expense_id = _to_int(id_str)
+        nota_id = _to_int(id_str)
         comment = comment.strip()
-        if expense_id is None or not comment:
-            await responder.send_text("Use: /rejeitar <id> <motivo>. O motivo é obrigatório.")
+        if nota_id is None or not comment:
+            await responder.send_text("Use: /nota_rejeitar <id> <motivo>. O motivo é obrigatório.")
             return
-        saved = await self._expenses.reject(ctx, expense_id, comment)
+        saved = await self._notas.reject(ctx, nota_id, comment)
         if saved is None:
-            await responder.send_text("Esse gasto não está mais aguardando aprovação.")
+            await responder.send_text("Essa nota não está mais aguardando aprovação.")
             return
-        await responder.send_text(f"❌ Gasto #{saved.id} rejeitado.\nMotivo: {comment}")
+        await responder.send_text(f"❌ Nota de débito #{saved.numero} rejeitada.\nMotivo: {comment}")
         await self._notify_author(
-            ctx,
-            saved,
-            f"❌ Seu gasto em {saved.store_name} (R$ {saved.total_amount:.2f}) foi rejeitado.\n"
-            f"Motivo: {comment}",
+            ctx, saved, f"❌ Sua nota de débito #{saved.numero} foi rejeitada.\nMotivo: {comment}"
         )
 
-    async def _reimburse_command(self, ctx, rest, responder) -> None:
-        expense_id = _to_int(rest)
-        if expense_id is None:
-            await responder.send_text("Use: /reembolsar <id>")
+    async def _pay_nota_cmd(self, ctx, rest, responder) -> None:
+        nota_id = _to_int(rest)
+        if nota_id is None:
+            await responder.send_text("Use: /nota_pagar <id>")
             return
-        await self._reimburse(ctx, expense_id, responder)
+        await self._pay_nota(ctx, nota_id, responder)
 
-    async def _reimburse(self, ctx, expense_id, responder) -> None:
+    async def _pay_nota(self, ctx, nota_id, responder) -> None:
         if not await self._require_approver(ctx, responder):
             return
-        saved = await self._expenses.mark_reimbursed(ctx, expense_id)
+        saved = await self._notas.pay(ctx, nota_id)
         if saved is None:
-            await responder.send_text("Só dá para reembolsar um gasto já aprovado.")
+            await responder.send_text("Só dá para pagar uma nota já aprovada.")
             return
-        await responder.send_text(f"💸 Gasto #{saved.id} marcado como reembolsado.")
+        await responder.send_text(f"💸 Nota de débito #{saved.numero} marcada como paga.")
         await self._notify_author(
-            ctx, saved, f"💸 Seu gasto em {saved.store_name} (R$ {saved.total_amount:.2f}) foi reembolsado."
+            ctx, saved, f"💸 Sua nota de débito #{saved.numero} foi paga."
         )
 
-    async def _my_reimbursements(self, ctx, responder) -> None:
-        items = await self._expenses.list_my_reimbursements(ctx)
-        if not items:
-            await responder.send_text("Você ainda não enviou gastos para reembolso.")
+    async def _require_approver(self, ctx, responder) -> bool:
+        if await self._org.is_admin(ctx):
+            return True
+        await responder.send_text("Apenas aprovadores (admin/owner) da empresa podem fazer isso.")
+        return False
+
+    # --- Dados fiscais / de pagamento ---------------------------------------
+
+    async def _my_data(self, ctx, rest, responder) -> None:
+        kv = _parse_kv(rest, ["CPF", "PIX", "BANCO", "AG", "CONTA"])
+        if not kv:
+            u = await self._org.get_user(ctx.user_id)
+            await responder.send_text(
+                "💳 Seus dados de pagamento (na nota de débito):\n"
+                f"CPF: {u.cpf or '—'}\nPIX: {u.pix_key or '—'}\n"
+                f"Banco: {u.bank_name or '—'} | Ag: {u.bank_agency or '—'} | Conta: {u.bank_account or '—'}\n\n"
+                "Para definir: /meus_dados CPF=000 PIX=... BANCO=... AG=... CONTA=..."
+            )
             return
-        lines = ["🧾 Seus reembolsos:\n"]
-        for e in items:
-            label = _STATUS_LABELS.get(e.status, e.status.value)
-            lines.append(f"#{e.id} {label} — {e.store_name}: R$ {e.total_amount:.2f}")
-            if e.status == ExpenseStatus.REJECTED and e.decision_comment:
-                lines.append(f"    ↳ motivo: {e.decision_comment}")
-        await responder.send_text("\n".join(lines))
+        await self._org.set_payment_info(
+            ctx,
+            cpf=kv.get("CPF"),
+            pix_key=kv.get("PIX"),
+            bank_name=kv.get("BANCO"),
+            bank_agency=kv.get("AG"),
+            bank_account=kv.get("CONTA"),
+        )
+        await responder.send_text("✅ Dados de pagamento atualizados.")
+
+    async def _org_data(self, ctx, rest, responder) -> None:
+        kv = _parse_kv(rest, ["CNPJ", "ENDERECO", "CEP"])
+        if not kv:
+            o = await self._org.get_org(ctx.org_id)
+            await responder.send_text(
+                "🏢 Dados fiscais da empresa (tomadora na nota):\n"
+                f"CNPJ: {o.cnpj or '—'}\nEndereço: {o.address or '—'}\nCEP: {o.cep or '—'}\n\n"
+                "Admin define: /empresa_dados CNPJ=... ENDERECO=... CEP=..."
+            )
+            return
+        saved = await self._org.set_org_fiscal(
+            ctx, cnpj=kv.get("CNPJ"), address=kv.get("ENDERECO"), cep=kv.get("CEP")
+        )
+        await responder.send_text(
+            "✅ Dados fiscais da empresa atualizados." if saved
+            else "Apenas admins podem editar os dados da empresa."
+        )
 
     # --- Acesso ao painel web ------------------------------------------------
 
@@ -469,34 +552,24 @@ class BotApplication:
             "Abra no navegador. Não compartilhe — é a sua chave de acesso."
         )
 
-    async def _require_approver(self, ctx, responder) -> bool:
-        if await self._org.is_admin(ctx):
-            return True
-        await responder.send_text("Apenas aprovadores (admin/owner) da empresa podem fazer isso.")
-        return False
-
     # --- Notificações push ---------------------------------------------------
 
     async def _notify_approvers(self, ctx) -> None:
-        pending = await self._expenses.list_pending_approvals(ctx)
+        pending = await self._notas.list_pending(ctx)
         contacts = await self._org.approver_external_ids(
             ctx.org_id, ctx.channel, exclude_user_id=ctx.user_id
         )
         text = (
-            f"📥 {ctx.display_name} enviou um gasto para aprovação.\n"
-            f"Você tem {len(pending)} gasto(s) a aprovar. Use /aprovacoes."
+            f"📥 {ctx.display_name} enviou uma nota de débito para aprovação.\n"
+            f"Você tem {len(pending)} nota(s) a aprovar. Use /aprovacoes."
         )
         for external_id in contacts:
             await self._notifier.notify(ctx.channel, external_id, text)
 
-    async def _notify_author(self, ctx, expense: Expense, text: str) -> None:
-        external_id = await self._org.external_id_for(expense.user_id, ctx.channel)
+    async def _notify_author(self, ctx, nota: NotaDebito, text: str) -> None:
+        external_id = await self._org.external_id_for(nota.user_id, ctx.channel)
         if external_id is not None:
             await self._notifier.notify(ctx.channel, external_id, text)
-
-    async def _format_approval_item(self, e: Expense) -> str:
-        author = await self._org.user_name(e.user_id) or f"usuário {e.user_id}"
-        return f"#{e.id} • {author}\n{self._format_expense(e)}"
 
     # --- Relatórios ----------------------------------------------------------
 
@@ -520,7 +593,7 @@ class BotApplication:
         if not expenses:
             await responder.send_text("Nenhum gasto encontrado.")
             return
-        lines = ["📋 Últimos gastos registrados:\n"]
+        lines = ["📋 Últimos gastos:\n"]
         for e in expenses:
             lines.append(f"📅 {e.date.strftime('%d/%m/%Y')} - {e.store_name}: R$ {e.total_amount:.2f}")
         await responder.send_text("\n".join(lines))
@@ -543,25 +616,75 @@ class BotApplication:
         return "Confira o gasto:\n\n" + self._format_expense(e) + "\n\nConfirmar ou editar?"
 
     @staticmethod
+    def _competencia(nota: NotaDebito) -> str:
+        return f"{_MESES[nota.competencia.month - 1]}/{nota.competencia.year}"
+
+    async def _send_nota(self, nota, items, responder, *, is_admin: bool, author=None) -> None:
+        """Renderiza a nota e oferece os botões adequados ao estado e ao papel."""
+        num = f"#{nota.numero}" if nota.numero else "(rascunho)"
+        lines = [f"🧾 Nota de débito {num} — {self._competencia(nota)}"]
+        if author:
+            lines.append(f"Emitente: {author}")
+        lines.append(f"Status: {_NOTA_LABELS[nota.status]}")
+        if nota.vencimento:
+            lines.append(f"Vencimento: {nota.vencimento.strftime('%d/%m/%Y')}")
+        lines.append("\nItens:")
+        for e in items:
+            extra = f" ({e.category}" + (f"/{e.cost_center})" if e.cost_center else ")")
+            lines.append(f"• {e.date.strftime('%d/%m')} {e.store_name} — R$ {e.total_amount:.2f}{extra}")
+        if not items:
+            lines.append("• (nenhum gasto ainda)")
+        if nota.outras_retencoes:
+            lines.append(f"\nRetenções/descontos: R$ {nota.outras_retencoes:.2f}")
+        lines.append(f"\n💰 Valor a pagar: R$ {valor_a_pagar(nota, items):.2f}")
+        if nota.status == NotaStatus.REJEITADA and nota.decision_comment:
+            lines.append(f"↳ motivo: {nota.decision_comment}")
+
+        actions = []
+        if nota.status == NotaStatus.ABERTA and not is_admin:
+            actions.append(PromptAction(f"{_NT_CLOSE}:{nota.id}", "✅ Fechar e enviar"))
+        elif nota.status == NotaStatus.ABERTA and is_admin:
+            actions.append(PromptAction(f"{_NT_CLOSE}:{nota.id}", "✅ Fechar e aprovar"))
+        if is_admin and nota.status == NotaStatus.FECHADA:
+            actions.append(PromptAction(f"{_NT_OK}:{nota.id}", "✅ Aprovar"))
+            actions.append(PromptAction(f"{_NT_NO}:{nota.id}", "❌ Rejeitar"))
+        if is_admin and nota.status == NotaStatus.APROVADA:
+            actions.append(PromptAction(f"{_NT_PAY}:{nota.id}", "💸 Marcar paga"))
+
+        text = "\n".join(lines)
+        if actions:
+            await responder.send_prompt(InteractivePrompt(text=text, actions=actions))
+        else:
+            await responder.send_text(text)
+
+    @staticmethod
     def _start_message(name: str) -> str:
         return (
             f"Olá, {name}! 👋 Sou seu assistente de finanças.\n\n"
-            "📸 Envie a foto de um comprovante (ou use /gasto para lançar por texto) — "
-            "você confirma e pode editar categoria/centro de custo antes de salvar.\n\n"
-            "🏢 Equipe:\n"
-            "/criar_empresa <nome> - cria uma empresa (você vira admin)\n"
-            "/entrar <código> - entra numa empresa pelo código\n"
-            "/empresa - empresa ativa e papel | /empresas, /trocar <id>\n\n"
-            "📂 Categorias/centros (admin): /add_categoria, /add_centro | /categorias, /centros\n\n"
-            "💸 Gastos:\n"
-            "/gasto <valor> <descrição> - lança um gasto por texto\n"
-            "/listar - últimos gastos | /resumo [meses] - total do período\n\n"
-            "🧾 Reembolso:\n"
-            "/reembolsos - status dos seus gastos enviados\n"
-            "/aprovacoes - fila de aprovação (aprovadores) | /rejeitar <id> <motivo>\n"
-            "/aprovar <id>, /aprovar_todos, /reembolsar <id> (aprovadores)\n\n"
-            "📊 Painel web: /login - link de acesso aos relatórios"
+            "📸 Envie a foto de um comprovante (ou use /gasto) — você confirma e o gasto "
+            "entra na sua nota de débito do mês.\n\n"
+            "🧾 Nota de débito:\n"
+            "/nota - sua nota aberta | /notas - todas as suas notas\n"
+            "/nota_fechar - fecha e envia a nota do mês para aprovação\n\n"
+            "✅ Aprovação (admin):\n"
+            "/aprovacoes - notas a aprovar | /nota_aprovar <id> | /nota_rejeitar <id> <motivo>\n"
+            "/nota_pagar <id> - marca como paga\n\n"
+            "🏢 Equipe: /criar_empresa, /entrar <código>, /empresa, /empresas, /trocar <id>\n"
+            "📂 Categorias/centros (admin): /add_categoria, /add_centro | /categorias, /centros\n"
+            "💳 Dados da nota: /meus_dados (CPF/banco/PIX) | /empresa_dados (CNPJ/endereço)\n"
+            "📈 /listar, /resumo [meses] | 📊 painel web: /login"
         )
+
+
+def _parse_kv(text: str, keys: list[str]) -> dict:
+    """Extrai pares `CHAVE=valor` de um texto livre (valores podem ter espaços)."""
+    if not text.strip():
+        return {}
+    alt = "|".join(keys)
+    pattern = re.compile(
+        rf"({alt})\s*=\s*(.*?)(?=\s+(?:{alt})\s*=|$)", re.IGNORECASE | re.DOTALL
+    )
+    return {mt.group(1).upper(): mt.group(2).strip() for mt in pattern.finditer(text)}
 
 
 def _to_int(value: str):

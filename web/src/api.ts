@@ -1,4 +1,4 @@
-import type { Me, ReportFilters, ReportOverview } from "./types";
+import type { Me, NotaSummary, ReportFilters, ReportOverview } from "./types";
 
 const API_URL = (import.meta.env.VITE_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
 const TOKEN_KEY = "pf_session";
@@ -61,6 +61,10 @@ export async function getOverview(f: ReportFilters): Promise<ReportOverview> {
   return asJson<ReportOverview>(
     await fetch(`${API_URL}/reports/overview${query(f)}`, { headers: authHeaders() }),
   );
+}
+
+export async function getNotas(): Promise<NotaSummary[]> {
+  return asJson<NotaSummary[]>(await fetch(`${API_URL}/notas`, { headers: authHeaders() }));
 }
 
 /** Baixa o CSV com o Bearer (não dá para usar <a href> direto por causa do header). */

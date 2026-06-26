@@ -11,7 +11,7 @@ from typing import Callable, Optional
 
 from pydantic import BaseModel
 
-from src.core.entities import Expense, ExpenseStatus
+from src.core.entities import Expense, NotaStatus
 from src.core.ports.repositories import UnitOfWork
 
 
@@ -19,7 +19,8 @@ from src.core.ports.repositories import UnitOfWork
 class ReportFilter:
     date_from: Optional[date] = None
     date_to: Optional[date] = None
-    statuses: Optional[list[ExpenseStatus]] = None
+    # Filtra pelos itens cujas notas estão neste estado (ex.: aprovada/paga).
+    nota_status: Optional[NotaStatus] = None
     category: Optional[str] = None
     cost_center: Optional[str] = None
     user_id: Optional[int] = None
@@ -67,10 +68,10 @@ class ReportService:
                 org_id,
                 date_from=flt.date_from,
                 date_to=flt.date_to,
-                statuses=flt.statuses,
                 category=flt.category,
                 cost_center=flt.cost_center,
                 user_id=flt.user_id,
+                nota_status=flt.nota_status,
             )
 
     async def _user_names(self, expenses: list[Expense]) -> dict[int, str]:

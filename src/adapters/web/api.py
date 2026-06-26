@@ -2,8 +2,8 @@
 
 Mesma posição arquitetural que o `TelegramChannel`: traduz HTTP ⇄ chamadas de
 serviço e **não contém regra de negócio**. Reusa `OrgService`/`AuthService`/
-`ReportService` — exatamente a mesma camada do bot. Pensada para uma SPA
-(React/Vite) consumir: JSON, CORS e auth por Bearer token.
+`ReportService`/`NotaService` — exatamente a mesma camada do bot. Pensada para uma
+SPA (React/Vite) consumir: JSON, CORS e auth por Bearer token.
 
 Auth: o usuário pede `/login` no bot, recebe um magic-link com um token de
 troca; o front chama `/auth/exchange` e guarda o token de sessão, enviado como
@@ -21,8 +21,9 @@ from fastapi.responses import Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-from src.core.entities import ExpenseStatus
+from src.core.entities import NotaStatus
 from src.core.services.auth_service import AuthService
+from src.core.services.nota_service import NotaService, valor_a_pagar
 from src.core.services.org_service import OrgService, UserContext
 from src.core.services.report_service import ReportFilter, ReportOverview, ReportService
 
@@ -43,14 +44,42 @@ class MeResponse(BaseModel):
     is_admin: bool
 
 
+class NotaSummaryOut(BaseModel):
+    id: int
+    numero: Optional[int]
+    competencia: date
+    status: str
+    vencimento: Optional[date]
+    author: str
+
+
+class ItemOut(BaseModel):
+    id: int
+    date: date
+    store_name: str
+    category: str
+    cost_center: Optional[str]
+    total_amount: float
+
+
+class NotaDetailOut(NotaSummaryOut):
+    items: list[ItemOut]
+    total: float
+    outras_retencoes: float
+    valor_a_pagar: float
+    observacoes: Optional[str]
+    decision_comment: Optional[str]
+
+
 def create_api(
     *,
     auth_service: AuthService,
     org_service: OrgService,
     report_service: ReportService,
+    nota_service: NotaService,
     cors_origins: list[str],
 ) -> FastAPI:
-    app = FastAPI(title="Pedro Finanças — Painel", version="3.0")
+    app = FastAPI(title="Pedro Finanças — Painel", version="5.0")
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -72,9 +101,7 @@ def create_api(
 
     async def require_admin(ctx: UserContext = Depends(current_context)) -> UserContext:
         if not await org_service.is_admin(ctx):
-            raise HTTPException(
-                status_code=403, detail="Apenas admin/owner acessam os relatórios."
-            )
+            raise HTTPException(status_code=403, detail="Apenas admin/owner acessam o painel.")
         return ctx
 
     @app.get("/")
@@ -102,11 +129,9 @@ def create_api(
         ctx: UserContext = Depends(require_admin),
         date_from: Optional[date] = Query(None, alias="from"),
         date_to: Optional[date] = Query(None, alias="to"),
-        status: Optional[str] = Query(None, description="status separados por vírgula"),
+        status: Optional[str] = Query(None, description="status da nota (ex.: aprovada)"),
     ) -> ReportOverview:
-        flt = ReportFilter(
-            date_from=date_from, date_to=date_to, statuses=_parse_statuses(status)
-        )
+        flt = ReportFilter(date_from=date_from, date_to=date_to, nota_status=_parse_nota_status(status))
         return await report_service.overview(ctx.org_id, flt)
 
     @app.get("/reports/export.csv")
@@ -116,32 +141,78 @@ def create_api(
         date_to: Optional[date] = Query(None, alias="to"),
         status: Optional[str] = Query(None),
     ) -> Response:
-        flt = ReportFilter(
-            date_from=date_from, date_to=date_to, statuses=_parse_statuses(status)
-        )
+        flt = ReportFilter(date_from=date_from, date_to=date_to, nota_status=_parse_nota_status(status))
         expenses = await report_service.list_for_export(ctx.org_id, flt)
-        names = {}
+        names: dict[int, str] = {}
         for e in expenses:
             if e.user_id not in names:
                 names[e.user_id] = await org_service.user_name(e.user_id) or str(e.user_id)
         return _csv_response(expenses, names)
 
+    @app.get("/notas", response_model=list[NotaSummaryOut])
+    async def list_notas(ctx: UserContext = Depends(current_context)) -> list[NotaSummaryOut]:
+        # Gestor vê as notas da empresa; funcionário, as suas.
+        is_admin = await org_service.is_admin(ctx)
+        notas = (
+            await nota_service.list_for_org(ctx) if is_admin
+            else await nota_service.list_for_user(ctx)
+        )
+        out = []
+        for n in notas:
+            out.append(
+                NotaSummaryOut(
+                    id=n.id,
+                    numero=n.numero,
+                    competencia=n.competencia,
+                    status=n.status.value,
+                    vencimento=n.vencimento,
+                    author=await org_service.user_name(n.user_id) or str(n.user_id),
+                )
+            )
+        return out
+
+    @app.get("/notas/{nota_id}", response_model=NotaDetailOut)
+    async def get_nota(nota_id: int, ctx: UserContext = Depends(current_context)) -> NotaDetailOut:
+        is_admin = await org_service.is_admin(ctx)
+        result = await nota_service.get_with_items(ctx, nota_id, include_others=is_admin)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Nota não encontrada.")
+        nota, items = result
+        return NotaDetailOut(
+            id=nota.id,
+            numero=nota.numero,
+            competencia=nota.competencia,
+            status=nota.status.value,
+            vencimento=nota.vencimento,
+            author=await org_service.user_name(nota.user_id) or str(nota.user_id),
+            items=[
+                ItemOut(
+                    id=e.id,
+                    date=e.date,
+                    store_name=e.store_name,
+                    category=e.category,
+                    cost_center=e.cost_center,
+                    total_amount=e.total_amount,
+                )
+                for e in items
+            ],
+            total=round(sum(e.total_amount for e in items), 2),
+            outras_retencoes=nota.outras_retencoes,
+            valor_a_pagar=valor_a_pagar(nota, items),
+            observacoes=nota.observacoes,
+            decision_comment=nota.decision_comment,
+        )
+
     return app
 
 
-def _parse_statuses(raw: Optional[str]) -> Optional[list[ExpenseStatus]]:
+def _parse_nota_status(raw: Optional[str]) -> Optional[NotaStatus]:
     if not raw:
         return None
-    out: list[ExpenseStatus] = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        try:
-            out.append(ExpenseStatus(part))
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"status inválido: {part}")
-    return out or None
+    try:
+        return NotaStatus(raw.strip())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"status inválido: {raw}")
 
 
 def _csv_response(expenses, names: dict) -> Response:
@@ -149,7 +220,7 @@ def _csv_response(expenses, names: dict) -> Response:
     writer = csv.writer(buffer)
     writer.writerow(
         ["id", "data", "funcionario", "loja", "categoria", "centro_custo",
-         "valor", "status", "pagamento"]
+         "valor", "pagamento"]
     )
     for e in expenses:
         writer.writerow([
@@ -160,7 +231,6 @@ def _csv_response(expenses, names: dict) -> Response:
             e.category,
             e.cost_center or "",
             f"{e.total_amount:.2f}",
-            e.status.value,
             e.payment_method or "",
         ])
     stamp = datetime.now().strftime("%Y%m%d")
