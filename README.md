@@ -108,6 +108,9 @@ docker compose up -d
 
 # Painel web (SPA React/Vite) — consome a API acima
 cd web && npm install && npm run dev   # http://localhost:5173
+
+# Dados de exemplo + link de acesso pronto (com API e SPA no ar)
+.venv/bin/python -m scripts.seed_demo  # cria a empresa "ACME Demo" e imprime o magic-link
 ```
 
 > Acesso ao painel: envie `/login` ao bot no Telegram → ele manda um link
