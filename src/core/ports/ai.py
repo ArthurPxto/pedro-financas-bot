@@ -24,5 +24,11 @@ class ExpenseExtractor(ABC):
     """Extrai dados estruturados de um gasto a partir dos bytes de uma imagem."""
 
     @abstractmethod
-    async def extract(self, image: bytes, mime_type: str = "image/jpeg") -> ExtractedExpense:
-        ...
+    async def extract(
+        self,
+        image: bytes,
+        mime_type: str = "image/jpeg",
+        categories: Optional[list[str]] = None,
+    ) -> ExtractedExpense:
+        """Extrai o gasto. Se `categories` for dada, a IA deve **sugerir** uma
+        categoria dentro dessa lista (definida pela org) em vez de inventar uma."""

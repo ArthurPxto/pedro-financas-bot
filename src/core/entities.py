@@ -27,26 +27,40 @@ class Role(str, Enum):
 
 
 class ExpenseStatus(str, Enum):
-    """Ciclo de vida de um gasto.
+    """Ciclo de vida de um gasto (rascunho → reembolso, Fase 2).
 
-    PENDING_REVIEW: extraído pela IA, aguardando confirmação do usuário.
-    REGISTERED: confirmado e contabilizado.
-    (Estados de reembolso — SUBMITTED/APPROVED/... — chegam na Fase 2.)
+    PENDING_REVIEW: extraído pela IA/digitado, aguardando confirmação do autor.
+    SUBMITTED: confirmado pelo autor, aguardando decisão de um aprovador.
+    APPROVED: aprovado por um aprovador (admin/owner da org).
+    REJECTED: rejeitado — exige comentário (`decision_comment`).
+    REIMBURSED: reembolsado ao autor (estado final).
+
+    Um gasto confirmado por quem já é aprovador (uso pessoal / admin) vai direto
+    para APPROVED; de um membro comum, vai para SUBMITTED até alguém decidir.
     """
 
     PENDING_REVIEW = "pending_review"
-    REGISTERED = "registered"
+    SUBMITTED = "submitted"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    REIMBURSED = "reimbursed"
 
 
 class Organization(BaseModel):
     id: Optional[int] = None
     name: str
+    join_code: Optional[str] = Field(
+        default=None, description="Código de convite para entrar na org (`/entrar <código>`)"
+    )
     created_at: Optional[datetime] = None
 
 
 class User(BaseModel):
     id: Optional[int] = None
     name: str
+    active_org_id: Optional[int] = Field(
+        default=None, description="Org em que os gastos deste usuário são lançados"
+    )
     created_at: Optional[datetime] = None
 
 
@@ -78,6 +92,14 @@ class Category(BaseModel):
     name: str
 
 
+class CostCenter(BaseModel):
+    """Centro de custo definido pela organização (base para reembolso/relatórios)."""
+
+    id: Optional[int] = None
+    org_id: int
+    name: str
+
+
 class Expense(BaseModel):
     """Gasto. Sempre referencia `org_id` e `user_id` internos (nunca o id de canal)."""
 
@@ -97,5 +119,14 @@ class Expense(BaseModel):
     )
     cost_center: Optional[str] = Field(
         default=None, description="Centro de custo (base para reembolso/aprovação)"
+    )
+    approver_id: Optional[int] = Field(
+        default=None, description="Usuário que aprovou/rejeitou (user_id interno)"
+    )
+    decision_comment: Optional[str] = Field(
+        default=None, description="Comentário da decisão — obrigatório na rejeição"
+    )
+    decided_at: Optional[datetime] = Field(
+        default=None, description="Quando o gasto foi aprovado/rejeitado/reembolsado"
     )
     created_at: Optional[datetime] = None

@@ -37,6 +37,7 @@ class OrganizationModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
+    join_code: Mapped[str | None] = mapped_column(String(32), unique=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -47,6 +48,8 @@ class UserModel(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255))
+    # Sem FK rígida para evitar dependência circular de criação (usuário ⇄ org pessoal).
+    active_org_id: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -99,6 +102,17 @@ class CategoryModel(Base):
     name: Mapped[str] = mapped_column(String(255))
 
 
+class CostCenterModel(Base):
+    __tablename__ = "cost_centers"
+    __table_args__ = (
+        UniqueConstraint("org_id", "name", name="uq_org_cost_center_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    org_id: Mapped[int] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(String(255))
+
+
 class ExpenseModel(Base):
     __tablename__ = "expenses"
 
@@ -120,6 +134,13 @@ class ExpenseModel(Base):
     )
     receipt_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     cost_center: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Decisão de aprovação (Fase 2). Sem FK rígida em approver_id para manter o
+    # padrão leve das outras colunas de usuário; o app garante org/role.
+    approver_id: Mapped[int | None] = mapped_column(nullable=True)
+    decision_comment: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
