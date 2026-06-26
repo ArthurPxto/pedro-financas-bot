@@ -133,19 +133,20 @@ cd web && npm install && npm run dev   # http://localhost:5173
 - `/add_categoria <nome>`, `/categorias` — categorias da org (a IA sugere dentro delas).
 - `/add_centro <nome>`, `/centros` — centros de custo da org.
 
-**Reembolso / aprovação (Fase 2)**
-- Ao confirmar, o gasto de um **membro** vai para aprovação (`aguardando → aprovado/rejeitado → reembolsado`); quem é **admin/owner** aprova direto (uso pessoal segue sem fricção).
-- `/reembolsos` — funcionário acompanha o status dos seus gastos enviados.
-- `/aprovacoes` — aprovador vê a fila com botões Aprovar/Rejeitar e "Aprovar todos" (aprovação em lote).
-- `/aprovar <id>`, `/aprovar_todos`, `/reembolsar <id>` — ações do aprovador.
-- `/rejeitar <id> <motivo>` — rejeita com **comentário obrigatório**.
-- Aprovadores recebem **notificação push** quando há gastos na fila; o autor é avisado da decisão.
+**Nota de débito / reembolso (Fase 5)**
+- Cada gasto confirmado vira **item da sua nota de débito do mês** (agrupada, com número e vencimento) — o documento que substitui a planilha.
+- `/nota` — sua nota aberta (itens, total, "a pagar"). `/notas` — todas as suas notas.
+- `/nota_fechar` — fecha e envia a nota para aprovação (`aberta → fechada → aprovada/rejeitada → paga`); admin/owner fecha já aprovando (uso pessoal sem fricção).
+- `/aprovacoes` — aprovador vê as notas pendentes com botões Aprovar/Rejeitar.
+- `/nota_aprovar <id>`, `/nota_pagar <id>`, e `/nota_rejeitar <id> <motivo>` (**comentário obrigatório**).
+- `/meus_dados` (CPF/banco/PIX) e `/empresa_dados` (CNPJ/endereço, admin) — dados que vão no cabeçalho/rodapé da nota.
+- Aprovadores recebem **push** quando há nota na fila; o autor é avisado da decisão.
 
 **Painel web (Fase 3 — backend)**
 - `/login` no bot envia um **magic-link** de acesso (auth pelo canal já linkado; reusa `ChannelIdentity` + o push da Fase 2).
 - API FastAPI (`src.api`), processo separado sobre os **mesmos serviços**: `POST /auth/exchange`, `GET /auth/me`, `GET /reports/overview` (totais por categoria/centro/pessoa/mês), `GET /reports/export.csv`.
 - Relatórios são **só para admin/owner** (visão do gestor); JSON + CORS.
-- **Painel SPA (`web/`, React/Vite):** login pelo magic-link do bot; herói com o total do período + filtros (de/até/status), rankings por categoria/centro/pessoa/mês e exportação CSV. _Aprovações pela web e export Sheets/PDF ficam para o próximo passo._
+- **Painel SPA (`web/`, React/Vite):** login pelo magic-link do bot; herói com o total do período + filtros (de/até/status da nota), rankings por categoria/centro/pessoa/mês, **lista de notas de débito** e exportação CSV. _Aprovações pela web e export Sheets/PDF ficam para o próximo passo._
 
 ## 🤝 Contributing
 Contributions, issues, and feature requests are welcome! Feel free to check the issues page.

@@ -11,6 +11,7 @@ from src.adapters.security.jwt_issuer import JwtTokenIssuer
 from src.adapters.web.api import create_api
 from src.config import get_settings
 from src.core.services.auth_service import AuthService
+from src.core.services.nota_service import NotaService
 from src.core.services.org_service import OrgService
 from src.core.services.report_service import ReportService
 from src.logging_config import configure_logging, get_logger
@@ -33,6 +34,7 @@ def build_app():
         auth_service=AuthService(token_issuer),
         org_service=OrgService(uow_factory),
         report_service=ReportService(uow_factory),
+        nota_service=NotaService(uow_factory),
         cors_origins=settings.cors_origins_list,
     )
 

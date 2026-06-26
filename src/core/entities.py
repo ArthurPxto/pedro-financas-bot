@@ -27,23 +27,37 @@ class Role(str, Enum):
 
 
 class ExpenseStatus(str, Enum):
-    """Ciclo de vida de um gasto (rascunho → reembolso, Fase 2).
+    """Ciclo de vida de um gasto como **item de uma nota de débito** (Fase 5).
 
     PENDING_REVIEW: extraído pela IA/digitado, aguardando confirmação do autor.
-    SUBMITTED: confirmado pelo autor, aguardando decisão de um aprovador.
-    APPROVED: aprovado por um aprovador (admin/owner da org).
-    REJECTED: rejeitado — exige comentário (`decision_comment`).
-    REIMBURSED: reembolsado ao autor (estado final).
+    CONFIRMED: confirmado pelo autor — vira uma linha da nota de débito aberta.
 
-    Um gasto confirmado por quem já é aprovador (uso pessoal / admin) vai direto
-    para APPROVED; de um membro comum, vai para SUBMITTED até alguém decidir.
+    A partir da Fase 5 o ciclo de reembolso (aprovação/pagamento) pertence à
+    **NotaDebito**, não ao gasto: o gasto é só um item. Ver [[NotaStatus]].
     """
 
     PENDING_REVIEW = "pending_review"
-    SUBMITTED = "submitted"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-    REIMBURSED = "reimbursed"
+    CONFIRMED = "confirmed"
+
+
+class NotaStatus(str, Enum):
+    """Ciclo de vida de uma nota de débito (o documento de reembolso mensal).
+
+    ABERTA: recebendo itens (gastos confirmados do mês).
+    FECHADA: fechada pelo autor e enviada para aprovação (pendente).
+    APROVADA: aprovada por um aprovador (admin/owner).
+    REJEITADA: rejeitada — exige comentário (`decision_comment`).
+    PAGA: reembolsada ao autor (estado final).
+
+    Quem já é aprovador (uso pessoal/admin) fecha a nota direto para APROVADA;
+    de um membro comum, vai para FECHADA até alguém decidir.
+    """
+
+    ABERTA = "aberta"
+    FECHADA = "fechada"
+    APROVADA = "aprovada"
+    REJEITADA = "rejeitada"
+    PAGA = "paga"
 
 
 class Organization(BaseModel):
@@ -52,6 +66,10 @@ class Organization(BaseModel):
     join_code: Optional[str] = Field(
         default=None, description="Código de convite para entrar na org (`/entrar <código>`)"
     )
+    # Dados fiscais da tomadora (cabeçalho da nota de débito) — Fase 5.
+    cnpj: Optional[str] = None
+    address: Optional[str] = None
+    cep: Optional[str] = None
     created_at: Optional[datetime] = None
 
 
@@ -61,6 +79,12 @@ class User(BaseModel):
     active_org_id: Optional[int] = Field(
         default=None, description="Org em que os gastos deste usuário são lançados"
     )
+    # Dados de pagamento do emitente (rodapé da nota de débito) — Fase 5.
+    cpf: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_agency: Optional[str] = None
+    bank_account: Optional[str] = None
+    pix_key: Optional[str] = None
     created_at: Optional[datetime] = None
 
 
@@ -120,13 +144,38 @@ class Expense(BaseModel):
     cost_center: Optional[str] = Field(
         default=None, description="Centro de custo (base para reembolso/aprovação)"
     )
+    nota_id: Optional[int] = Field(
+        default=None, description="Nota de débito à qual este gasto pertence (item da nota)"
+    )
+    created_at: Optional[datetime] = None
+
+
+class NotaDebito(BaseModel):
+    """Nota de débito: documento de reembolso mensal que agrupa gastos (itens).
+
+    O autor (emitente) cobra a organização (tomadora) por gastos pagos do próprio
+    bolso. Carrega o ciclo de reembolso (ver `NotaStatus`), um número sequencial
+    por org (atribuído ao fechar) e a competência (mês de referência).
+    """
+
+    id: Optional[int] = None
+    org_id: int
+    user_id: int
+    numero: Optional[int] = Field(
+        default=None, description="Número sequencial por org, atribuído ao fechar a nota"
+    )
+    competencia: date_type = Field(description="Mês de referência (1º dia do mês)")
+    status: NotaStatus = NotaStatus.ABERTA
+    vencimento: Optional[date_type] = Field(
+        default=None, description="Vencimento (5º dia útil do mês seguinte), definido ao fechar"
+    )
+    outras_retencoes: float = Field(default=0.0, description="Retenções/descontos sobre o total")
+    observacoes: Optional[str] = None
     approver_id: Optional[int] = Field(
         default=None, description="Usuário que aprovou/rejeitou (user_id interno)"
     )
     decision_comment: Optional[str] = Field(
         default=None, description="Comentário da decisão — obrigatório na rejeição"
     )
-    decided_at: Optional[datetime] = Field(
-        default=None, description="Quando o gasto foi aprovado/rejeitado/reembolsado"
-    )
+    decided_at: Optional[datetime] = None
     created_at: Optional[datetime] = None

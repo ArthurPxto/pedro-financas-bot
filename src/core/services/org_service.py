@@ -131,6 +131,40 @@ class OrgService:
             user = await uow.users.get(user_id)
             return user.name if user else None
 
+    # --- Dados fiscais / de pagamento (Fase 5) ------------------------------
+
+    async def get_user(self, user_id: int) -> Optional[User]:
+        async with self._uow_factory() as uow:
+            return await uow.users.get(user_id)
+
+    async def get_org(self, org_id: int) -> Optional[Organization]:
+        async with self._uow_factory() as uow:
+            return await uow.organizations.get(org_id)
+
+    async def set_payment_info(self, ctx: UserContext, **fields) -> User:
+        """Atualiza os dados de pagamento do emitente (CPF/banco/PIX). Só os campos dados."""
+        async with self._uow_factory() as uow:
+            user = await uow.users.get(ctx.user_id)
+            for key in ("cpf", "bank_name", "bank_agency", "bank_account", "pix_key"):
+                if fields.get(key) is not None:
+                    setattr(user, key, fields[key])
+            saved = await uow.users.update_fiscal(user)
+            await uow.commit()
+            return saved
+
+    async def set_org_fiscal(self, ctx: UserContext, **fields) -> Optional[Organization]:
+        """Atualiza os dados fiscais da org ativa (CNPJ/endereço/CEP). Só admin/owner."""
+        if not await self.is_admin(ctx):
+            return None
+        async with self._uow_factory() as uow:
+            org = await uow.organizations.get(ctx.org_id)
+            for key in ("cnpj", "address", "cep"):
+                if fields.get(key) is not None:
+                    setattr(org, key, fields[key])
+            saved = await uow.organizations.update_fiscal(org)
+            await uow.commit()
+            return saved
+
     # --- Onboarding de equipe ------------------------------------------------
 
     async def create_organization(self, ctx: UserContext, name: str) -> Organization:

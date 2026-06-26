@@ -14,6 +14,8 @@ from src.core.entities import (
     CostCenter,
     Expense,
     Membership,
+    NotaDebito,
+    NotaStatus,
     Organization,
     User,
 )
@@ -48,6 +50,10 @@ class UserRepository(ABC):
     async def set_active_org(self, user_id: int, org_id: int) -> None:
         ...
 
+    @abstractmethod
+    async def update_fiscal(self, user: User) -> User:
+        """Persiste os dados de pagamento do emitente (CPF/banco/PIX)."""
+
 
 class OrganizationRepository(ABC):
     @abstractmethod
@@ -57,6 +63,10 @@ class OrganizationRepository(ABC):
     @abstractmethod
     async def get(self, org_id: int) -> Optional[Organization]:
         ...
+
+    @abstractmethod
+    async def update_fiscal(self, org: Organization) -> Organization:
+        """Persiste os dados fiscais da tomadora (CNPJ/endereço/CEP)."""
 
     @abstractmethod
     async def get_primary_for_user(self, user_id: int) -> Optional[Organization]:
@@ -131,14 +141,8 @@ class ExpenseRepository(ABC):
         ...
 
     @abstractmethod
-    async def list_pending_for_org(self, org_id: int) -> list[Expense]:
-        """Gastos SUBMITTED da org — a fila de aprovação."""
-
-    @abstractmethod
-    async def list_for_reimbursements(
-        self, org_id: int, user_id: int, limit: int = 10
-    ) -> list[Expense]:
-        """Gastos do usuário já submetidos (qualquer estado de reembolso), recentes."""
+    async def list_for_nota(self, nota_id: int) -> list[Expense]:
+        """Itens (gastos) de uma nota de débito."""
 
     @abstractmethod
     async def list_filtered(
@@ -151,8 +155,46 @@ class ExpenseRepository(ABC):
         category: Optional[str] = None,
         cost_center: Optional[str] = None,
         user_id: Optional[int] = None,
+        nota_status: Optional[NotaStatus] = None,
     ) -> list[Expense]:
-        """Gastos da org filtrados (base dos relatórios e da exportação do painel)."""
+        """Gastos da org filtrados (base dos relatórios e da exportação do painel).
+
+        `nota_status` restringe aos itens cujas notas estão no estado dado.
+        """
+
+
+class NotaRepository(ABC):
+    @abstractmethod
+    async def add(self, nota: NotaDebito) -> NotaDebito:
+        ...
+
+    @abstractmethod
+    async def get(self, nota_id: int) -> Optional[NotaDebito]:
+        ...
+
+    @abstractmethod
+    async def get_open_for_user(self, org_id: int, user_id: int) -> Optional[NotaDebito]:
+        """Nota ABERTA do usuário na org (onde caem os gastos confirmados)."""
+
+    @abstractmethod
+    async def next_numero(self, org_id: int) -> int:
+        """Próximo número sequencial de nota para a org."""
+
+    @abstractmethod
+    async def list_for_user(self, org_id: int, user_id: int, limit: int = 20) -> list[NotaDebito]:
+        ...
+
+    @abstractmethod
+    async def list_pending_for_org(self, org_id: int) -> list[NotaDebito]:
+        """Notas FECHADAS da org — a fila de aprovação."""
+
+    @abstractmethod
+    async def list_for_org(self, org_id: int, limit: int = 50) -> list[NotaDebito]:
+        """Todas as notas da org (visão do gestor no painel)."""
+
+    @abstractmethod
+    async def update(self, nota: NotaDebito) -> NotaDebito:
+        ...
 
 
 class UnitOfWork(ABC):
@@ -168,6 +210,7 @@ class UnitOfWork(ABC):
     expenses: ExpenseRepository
     categories: CategoryRepository
     cost_centers: CostCenterRepository
+    notas: NotaRepository
 
     @abstractmethod
     async def __aenter__(self) -> "UnitOfWork":

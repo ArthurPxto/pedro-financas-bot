@@ -1,8 +1,9 @@
 """Popula dados de exemplo e imprime um link de acesso ao painel.
 
 Atalho para ver o dashboard rodando **sem precisar do bot do Telegram**: cria
-uma empresa demo (gestora + 2 funcionários) com gastos variados (categorias,
-centros de custo, pessoas, meses e status) e gera um magic-link já válido.
+uma empresa demo (gestora + 2 funcionários) com notas de débito em vários
+estados (aberta, aguardando, aprovada, rejeitada, paga) e seus itens, e gera um
+magic-link já válido.
 
 Rode da raiz do repo:
 
@@ -18,31 +19,41 @@ from src.adapters.persistence.database import create_engine, create_session_fact
 from src.adapters.persistence.repositories import SqlAlchemyUnitOfWork
 from src.adapters.security.jwt_issuer import JwtTokenIssuer
 from src.config import get_settings
-from src.core.entities import Channel, Expense, ExpenseStatus
+from src.core.entities import Channel, Expense, ExpenseStatus, NotaDebito, NotaStatus
 from src.core.services.auth_service import AuthService
+from src.core.services.nota_service import fifth_business_day_next_month, first_of_month
 from src.core.services.org_service import OrgService
 
 COMPANY = "ACME Demo"
 CATEGORIES = ["Alimentação", "Transporte", "Hospedagem", "Material de escritório"]
 COST_CENTERS = ["Comercial", "Operações", "Diretoria"]
 
-# (funcionário, loja, valor, categoria, centro, data, status)
+# Cada nota: (autor, competência, status, [(loja, valor, categoria, centro), ...], motivo)
 A, B, G = "ana", "bruno", "admin"
-DEMO = [
-    (A, "Restaurante Sabor", 87.50, "Alimentação", "Comercial", date(2026, 2, 10), "approved"),
-    (A, "Uber", 32.00, "Transporte", "Comercial", date(2026, 2, 12), "reimbursed"),
-    (A, "Hotel Ibis", 320.00, "Hospedagem", "Comercial", date(2026, 3, 5), "approved"),
-    (B, "Posto Shell", 210.00, "Transporte", "Operações", date(2026, 3, 20), "approved"),
-    (B, "Kalunga", 145.90, "Material de escritório", "Operações", date(2026, 4, 2), "submitted"),
-    (B, "Padaria do Zé", 24.00, "Alimentação", "Operações", date(2026, 4, 15), "rejected"),
-    (A, "99 Táxi", 41.30, "Transporte", "Comercial", date(2026, 5, 8), "submitted"),
-    (A, "Mercado Extra", 198.70, "Alimentação", "Operações", date(2026, 5, 22), "approved"),
-    (G, "Notebook Dell", 4200.00, "Material de escritório", "Diretoria", date(2026, 5, 28), "reimbursed"),
-    (B, "Correios", 126.09, "Transporte", "Operações", date(2026, 6, 3), "approved"),
-    (A, "Hotel Mercure", 540.00, "Hospedagem", "Comercial", date(2026, 6, 10), "submitted"),
-    (G, "Almoço cliente", 156.00, "Alimentação", "Diretoria", date(2026, 6, 18), "approved"),
+NOTAS = [
+    (A, date(2026, 2, 1), "paga", [
+        ("Mercado Extra", 100.0, "Alimentação", "Comercial"),
+        ("Uber", 32.0, "Transporte", "Comercial"),
+    ], None),
+    (B, date(2026, 3, 1), "aprovada", [
+        ("Posto Shell", 210.0, "Transporte", "Operações"),
+        ("Hotel Ibis", 320.0, "Hospedagem", "Operações"),
+    ], None),
+    (G, date(2026, 5, 1), "aprovada", [
+        ("Notebook Dell", 4200.0, "Material de escritório", "Diretoria"),
+    ], None),
+    (A, date(2026, 4, 1), "fechada", [
+        ("Kalunga", 145.90, "Material de escritório", "Comercial"),
+        ("99 Táxi", 41.30, "Transporte", "Comercial"),
+    ], None),
+    (B, date(2026, 4, 1), "rejeitada", [
+        ("Padaria do Zé", 24.0, "Alimentação", "Operações"),
+    ], "Sem comprovante"),
+    (A, date(2026, 6, 1), "aberta", [
+        ("Correios", 126.09, "Transporte", "Comercial"),
+        ("Hotel Mercure", 540.0, "Hospedagem", "Comercial"),
+    ], None),
 ]
-_ALL_STATUSES = list(ExpenseStatus)
 
 
 async def main() -> None:
@@ -54,14 +65,13 @@ async def main() -> None:
     uow_factory = lambda: SqlAlchemyUnitOfWork(create_session_factory(engine))  # noqa: E731
     org = OrgService(uow_factory)
 
-    # Gestora + empresa (idempotente: reusa se já existir)
     admin = await org.resolve_context(Channel.TELEGRAM, "demo-admin", "Gestora Demo")
     company = next((o for o, _ in await org.list_organizations(admin) if o.name == COMPANY), None)
     if company is None:
         company = await org.create_organization(admin, COMPANY)
     admin = await org.resolve_context(Channel.TELEGRAM, "demo-admin", "Gestora Demo")
+    await org.set_org_fiscal(admin, cnpj="55.196.121/0001-42", address="Rua Pais Leme, 215 - São Paulo", cep="05424150")
 
-    # Funcionários entram na empresa
     people = {G: admin}
     for ext, name in [(A, "Ana"), (B, "Bruno")]:
         ctx = await org.resolve_context(Channel.TELEGRAM, f"demo-{ext}", name)
@@ -73,35 +83,50 @@ async def main() -> None:
     for cc in COST_CENTERS:
         await org.add_cost_center(admin, cc)
 
-    # Gastos (só se ainda não houver nenhum na empresa)
     async with uow_factory() as uow:
-        existing = await uow.expenses.list_filtered(company.id, statuses=_ALL_STATUSES)
+        existing = await uow.notas.list_for_org(company.id)
         if existing:
-            print(f"• Empresa '{COMPANY}' já tem {len(existing)} gastos — pulando o seed.")
+            print(f"• Empresa '{COMPANY}' já tem {len(existing)} notas — pulando o seed.")
         else:
             now = datetime.now()
-            for ext, store, amount, cat, cc, when, status in DEMO:
-                st = ExpenseStatus(status)
-                decided = st in (ExpenseStatus.APPROVED, ExpenseStatus.REJECTED, ExpenseStatus.REIMBURSED)
-                await uow.expenses.add(
-                    Expense(
+            numero = 0
+            for ext, comp, status_str, items, motivo in NOTAS:
+                st = NotaStatus(status_str)
+                closed = st != NotaStatus.ABERTA
+                if closed:
+                    numero += 1
+                nota = await uow.notas.add(
+                    NotaDebito(
                         org_id=company.id,
                         user_id=people[ext].user_id,
-                        store_name=store,
-                        total_amount=amount,
-                        category=cat,
-                        date=when,
-                        cost_center=cc,
+                        numero=numero if closed else None,
+                        competencia=first_of_month(comp),
                         status=st,
-                        approver_id=admin.user_id if decided else None,
-                        decision_comment="Sem comprovante" if st is ExpenseStatus.REJECTED else None,
-                        decided_at=now if decided else None,
+                        vencimento=fifth_business_day_next_month(comp) if closed else None,
                     )
                 )
+                if st in (NotaStatus.APROVADA, NotaStatus.REJEITADA, NotaStatus.PAGA):
+                    nota.approver_id = admin.user_id
+                    nota.decided_at = now
+                    nota.decision_comment = motivo
+                    await uow.notas.update(nota)
+                for store, amount, cat, cc in items:
+                    await uow.expenses.add(
+                        Expense(
+                            org_id=company.id,
+                            user_id=people[ext].user_id,
+                            store_name=store,
+                            total_amount=amount,
+                            category=cat,
+                            date=comp,
+                            cost_center=cc,
+                            status=ExpenseStatus.CONFIRMED,
+                            nota_id=nota.id,
+                        )
+                    )
             await uow.commit()
-            print(f"• {len(DEMO)} gastos de exemplo criados em '{COMPANY}'.")
+            print(f"• {len(NOTAS)} notas de exemplo criadas em '{COMPANY}'.")
 
-    # Magic-link de acesso (mesma mecânica do /login no bot)
     auth = AuthService(JwtTokenIssuer(secret=settings.web_jwt_secret))
     token = auth.create_login_token(admin.user_id)
     base = settings.web_base_url.rstrip("/")
