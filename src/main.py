@@ -31,13 +31,15 @@ def main() -> None:
     )
     receipts = FilesystemReceiptStorage(base_dir=settings.receipt_storage_dir)
 
+    # Adapter de entrada (driving) — Telegram atrás do port de canal.
+    # Criado antes dos serviços porque também é o Notifier (push proativo).
+    channel = TelegramChannel(token=settings.telegram_token)
+
     # Serviços (núcleo)
     org_service = OrgService(uow_factory)
     expense_service = ExpenseService(uow_factory, extractor, receipts)
-    app = BotApplication(org_service, expense_service)
+    app = BotApplication(org_service, expense_service, notifier=channel)
 
-    # Adapter de entrada (driving) — Telegram atrás do port de canal
-    channel = TelegramChannel(token=settings.telegram_token)
     channel.set_handler(app.handle)
 
     log.info("Bot iniciando", channel=channel.channel.value)

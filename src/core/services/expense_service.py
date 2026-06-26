@@ -88,18 +88,29 @@ class ExpenseService:
         log.info("draft manual criado", expense_id=saved.id, org_id=ctx.org_id)
         return saved
 
-    async def confirm(self, ctx: UserContext, expense_id: int) -> Optional[Expense]:
-        """Confirma um rascunho do próprio usuário, marcando-o como registrado."""
+    async def confirm(
+        self, ctx: UserContext, expense_id: int, approve_directly: bool = False
+    ) -> Optional[Expense]:
+        """Confirma um rascunho do próprio usuário e o coloca no fluxo de reembolso.
+
+        `approve_directly` (o autor já é aprovador — uso pessoal/admin) leva o gasto
+        direto a APPROVED, sem fila. Caso contrário, fica SUBMITTED até um aprovador
+        decidir. Idempotente: a inline keyboard persiste após o clique, então só age
+        sobre um rascunho ainda PENDING_REVIEW.
+        """
         async with self._uow_factory() as uow:
             expense = await uow.expenses.get(expense_id)
-            # Idempotente: só age sobre um rascunho do próprio usuário ainda pendente.
-            # Evita confirmar duas vezes (a inline keyboard persiste após o clique).
             if not self._is_actionable_draft(ctx, expense):
                 return None
-            expense.status = ExpenseStatus.REGISTERED
+            if approve_directly:
+                expense.status = ExpenseStatus.APPROVED
+                expense.approver_id = ctx.user_id
+                expense.decided_at = datetime.now()
+            else:
+                expense.status = ExpenseStatus.SUBMITTED
             saved = await uow.expenses.update(expense)
             await uow.commit()
-        log.info("gasto confirmado", expense_id=expense_id)
+        log.info("gasto confirmado", expense_id=expense_id, status=saved.status.value)
         return saved
 
     async def cancel(self, ctx: UserContext, expense_id: int) -> bool:
@@ -161,6 +172,87 @@ class ExpenseService:
         since = (datetime.now() - timedelta(days=30 * months)).date()
         async with self._uow_factory() as uow:
             return await uow.expenses.sum_since(ctx.org_id, ctx.user_id, since)
+
+    # --- Aprovação / reembolso ----------------------------------------------
+    #
+    # Estas operações pressupõem que o chamador (app) já validou que ctx é de um
+    # aprovador da org. O serviço garante apenas a transição de estado correta e
+    # o escopo por org (um aprovador nunca decide gastos de outra empresa).
+
+    async def list_pending_approvals(self, ctx: UserContext) -> list[Expense]:
+        async with self._uow_factory() as uow:
+            return await uow.expenses.list_pending_for_org(ctx.org_id)
+
+    async def list_my_reimbursements(self, ctx: UserContext, limit: int = 10) -> list[Expense]:
+        async with self._uow_factory() as uow:
+            return await uow.expenses.list_for_reimbursements(ctx.org_id, ctx.user_id, limit)
+
+    async def approve(self, ctx: UserContext, expense_id: int) -> Optional[Expense]:
+        """SUBMITTED → APPROVED. None se não for um gasto submetido desta org."""
+        return await self._decide(ctx, expense_id, ExpenseStatus.APPROVED)
+
+    async def reject(
+        self, ctx: UserContext, expense_id: int, comment: str
+    ) -> Optional[Expense]:
+        """SUBMITTED → REJECTED, com comentário obrigatório (validado pelo app)."""
+        return await self._decide(ctx, expense_id, ExpenseStatus.REJECTED, comment=comment)
+
+    async def approve_all(self, ctx: UserContext) -> list[Expense]:
+        """Aprova de uma vez todos os gastos submetidos da org. Aprovação em lote."""
+        decided: list[Expense] = []
+        async with self._uow_factory() as uow:
+            pending = await uow.expenses.list_pending_for_org(ctx.org_id)
+            for expense in pending:
+                expense.status = ExpenseStatus.APPROVED
+                expense.approver_id = ctx.user_id
+                expense.decided_at = datetime.now()
+                decided.append(await uow.expenses.update(expense))
+            await uow.commit()
+        log.info("aprovação em lote", org_id=ctx.org_id, count=len(decided))
+        return decided
+
+    async def mark_reimbursed(self, ctx: UserContext, expense_id: int) -> Optional[Expense]:
+        """APPROVED → REIMBURSED (estado final)."""
+        async with self._uow_factory() as uow:
+            expense = await uow.expenses.get(expense_id)
+            if (
+                expense is None
+                or expense.org_id != ctx.org_id
+                or expense.status != ExpenseStatus.APPROVED
+            ):
+                return None
+            expense.status = ExpenseStatus.REIMBURSED
+            expense.decided_at = datetime.now()
+            saved = await uow.expenses.update(expense)
+            await uow.commit()
+        log.info("gasto reembolsado", expense_id=expense_id)
+        return saved
+
+    async def _decide(
+        self,
+        ctx: UserContext,
+        expense_id: int,
+        status: ExpenseStatus,
+        *,
+        comment: Optional[str] = None,
+    ) -> Optional[Expense]:
+        async with self._uow_factory() as uow:
+            expense = await uow.expenses.get(expense_id)
+            # Idempotente e escopado: só decide um gasto SUBMITTED da org do aprovador.
+            if (
+                expense is None
+                or expense.org_id != ctx.org_id
+                or expense.status != ExpenseStatus.SUBMITTED
+            ):
+                return None
+            expense.status = status
+            expense.approver_id = ctx.user_id
+            expense.decision_comment = comment
+            expense.decided_at = datetime.now()
+            saved = await uow.expenses.update(expense)
+            await uow.commit()
+        log.info("gasto decidido", expense_id=expense_id, status=status.value)
+        return saved
 
     @staticmethod
     def _is_actionable_draft(ctx: UserContext, expense: Optional[Expense]) -> bool:

@@ -34,11 +34,13 @@ class UserContext:
     """Identidade interna resolvida, passada às operações de negócio.
 
     `org_id` é a organização **ativa** do usuário (onde os gastos são lançados).
+    `channel` é por onde ele falou — usado para endereçar notificações push.
     """
 
     user_id: int
     org_id: int
     display_name: str
+    channel: Channel
 
 
 class OrgService:
@@ -63,7 +65,7 @@ class OrgService:
                     await uow.users.set_active_org(user.id, org.id)
                     org_id = org.id
                     await uow.commit()
-                return UserContext(user.id, org_id, display_name)
+                return UserContext(user.id, org_id, display_name, channel)
 
             # Primeira interação: usuário + org pessoal + vínculo de canal.
             user = await uow.users.add(User(name=display_name or "Usuário"))
@@ -73,7 +75,42 @@ class OrgService:
                 ChannelIdentity(user_id=user.id, channel=channel, external_id=external_id)
             )
             await uow.commit()
-            return UserContext(user.id, org.id, display_name)
+            return UserContext(user.id, org.id, display_name, channel)
+
+    # --- Aprovadores (para notificação push) --------------------------------
+
+    async def approver_external_ids(
+        self, org_id: int, channel: Channel, exclude_user_id: Optional[int] = None
+    ) -> list[str]:
+        """external_ids dos aprovadores (admin/owner) da org no canal dado.
+
+        Usado para avisar quem pode aprovar que há gastos na fila. Quem não usa
+        o canal (sem `ChannelIdentity`) simplesmente não recebe push.
+        """
+        async with self._uow_factory() as uow:
+            memberships = await uow.memberships.list_for_org(org_id)
+            ids: list[str] = []
+            for mb in memberships:
+                if mb.role not in (Role.OWNER, Role.ADMIN) or mb.user_id == exclude_user_id:
+                    continue
+                identity = await uow.users.get_channel_identity(mb.user_id, channel)
+                if identity is not None:
+                    ids.append(identity.external_id)
+            return ids
+
+    async def external_id_for(
+        self, user_id: int, channel: Channel
+    ) -> Optional[str]:
+        """external_id de um usuário no canal (para avisar o autor da decisão)."""
+        async with self._uow_factory() as uow:
+            identity = await uow.users.get_channel_identity(user_id, channel)
+            return identity.external_id if identity else None
+
+    async def user_name(self, user_id: int) -> Optional[str]:
+        """Nome de exibição de um usuário (para rotular gastos na fila de aprovação)."""
+        async with self._uow_factory() as uow:
+            user = await uow.users.get(user_id)
+            return user.name if user else None
 
     # --- Onboarding de equipe ------------------------------------------------
 

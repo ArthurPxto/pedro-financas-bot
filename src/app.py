@@ -4,13 +4,14 @@ Implementa a assinatura `MessageHandler`: recebe `IncomingMessage` + `ChannelRes
 e orquestra `OrgService`/`ExpenseService`. Não conhece Telegram nem WhatsApp — só fala
 em termos de mensagens normalizadas e prompts interativos abstratos.
 """
-from src.core.entities import Expense, Role
+from src.core.entities import Expense, ExpenseStatus, Role
 from src.core.ports.messaging import (
     ChannelResponder,
     IncomingMessage,
     InteractivePrompt,
     PromptAction,
 )
+from src.core.ports.notifications import Notifier
 from src.core.services.expense_service import ExpenseService
 from src.core.services.org_service import OrgService, UserContext
 from src.logging_config import get_logger
@@ -25,12 +26,31 @@ _OPEN_CAT = "exp_cat"   # abre o seletor de categoria
 _OPEN_CC = "exp_cc"     # abre o seletor de centro de custo
 _SET_CAT = "setcat"     # setcat:<id>:<idx>
 _SET_CC = "setcc"       # setcc:<id>:<idx>
+_APV_OK = "apv_ok"      # aprova um gasto:        apv_ok:<id>
+_APV_NO = "apv_no"      # inicia rejeição:        apv_no:<id>
+_APV_ALL = "apv_all"    # aprova todos pendentes
+_APV_REIMB = "apv_reimb"  # marca reembolsado:    apv_reimb:<id>
+
+# Rótulos amigáveis (PT) de cada estado, para a visão "meus reembolsos".
+_STATUS_LABELS = {
+    ExpenseStatus.PENDING_REVIEW: "📝 rascunho",
+    ExpenseStatus.SUBMITTED: "⏳ aguardando aprovação",
+    ExpenseStatus.APPROVED: "✅ aprovado",
+    ExpenseStatus.REJECTED: "❌ rejeitado",
+    ExpenseStatus.REIMBURSED: "💸 reembolsado",
+}
 
 
 class BotApplication:
-    def __init__(self, org_service: OrgService, expense_service: ExpenseService):
+    def __init__(
+        self,
+        org_service: OrgService,
+        expense_service: ExpenseService,
+        notifier: Notifier,
+    ):
         self._org = org_service
         self._expenses = expense_service
+        self._notifier = notifier
 
     async def handle(self, message: IncomingMessage, responder: ChannelResponder) -> None:
         ctx = await self._org.resolve_context(
@@ -67,6 +87,12 @@ class BotApplication:
             "add_categoria": lambda: self._add_category(ctx, rest, responder),
             "centros": lambda: self._list_cost_centers(ctx, responder),
             "add_centro": lambda: self._add_cost_center(ctx, rest, responder),
+            "aprovacoes": lambda: self._list_approvals(ctx, responder),
+            "aprovar": lambda: self._approve_command(ctx, rest, responder),
+            "aprovar_todos": lambda: self._approve_all(ctx, responder),
+            "rejeitar": lambda: self._reject_command(ctx, rest, responder),
+            "reembolsar": lambda: self._reimburse_command(ctx, rest, responder),
+            "reembolsos": lambda: self._my_reimbursements(ctx, responder),
         }
         handler = handlers.get(command)
         if handler:
@@ -212,11 +238,7 @@ class BotApplication:
         verb, _, args = action.partition(":")
 
         if verb == _CONFIRM:
-            saved = await self._expenses.confirm(ctx, _to_int(args))
-            await responder.send_text(
-                f"✅ Gasto registrado!\n{self._format_expense(saved)}" if saved
-                else "Não encontrei esse rascunho para confirmar."
-            )
+            await self._confirm_draft(ctx, _to_int(args), responder)
         elif verb == _DELETE:
             ok = await self._expenses.cancel(ctx, _to_int(args))
             await responder.send_text("🗑️ Gasto excluído." if ok else "Nada a excluir.")
@@ -226,6 +248,33 @@ class BotApplication:
             await self._open_picker(ctx, _to_int(args), responder, kind="cc")
         elif verb in (_SET_CAT, _SET_CC):
             await self._apply_picker(ctx, verb, args, responder)
+        elif verb == _APV_OK:
+            await self._approve_one(ctx, _to_int(args), responder)
+        elif verb == _APV_NO:
+            await self._prompt_reject(ctx, _to_int(args), responder)
+        elif verb == _APV_ALL:
+            await self._approve_all(ctx, responder)
+        elif verb == _APV_REIMB:
+            await self._reimburse(ctx, _to_int(args), responder)
+
+    # --- Confirmação do rascunho (entra no fluxo de reembolso) ---------------
+
+    async def _confirm_draft(self, ctx, expense_id, responder) -> None:
+        # Quem já é aprovador (uso pessoal / admin) não precisa de fila: aprova direto.
+        approve_directly = await self._org.is_admin(ctx)
+        saved = await self._expenses.confirm(
+            ctx, expense_id, approve_directly=approve_directly
+        )
+        if saved is None:
+            await responder.send_text("Não encontrei esse rascunho para confirmar.")
+        elif saved.status == ExpenseStatus.APPROVED:
+            await responder.send_text(f"✅ Gasto registrado!\n{self._format_expense(saved)}")
+        else:  # SUBMITTED — aguardando um aprovador
+            await responder.send_text(
+                f"📤 Gasto enviado para aprovação!\n{self._format_expense(saved)}\n\n"
+                "Acompanhe o status em /reembolsos."
+            )
+            await self._notify_approvers(ctx)
 
     async def _open_picker(self, ctx, expense_id, responder, *, kind: str) -> None:
         if expense_id is None or await self._expenses.get_draft(ctx, expense_id) is None:
@@ -274,6 +323,159 @@ class BotApplication:
             return
         # Reapresenta o rascunho atualizado para o usuário continuar ou confirmar.
         await self._send_draft_prompt(ctx, updated, responder)
+
+    # --- Aprovação / reembolso ----------------------------------------------
+
+    async def _list_approvals(self, ctx, responder) -> None:
+        if not await self._require_approver(ctx, responder):
+            return
+        pending = await self._expenses.list_pending_approvals(ctx)
+        if not pending:
+            await responder.send_text("✅ Nenhum gasto aguardando aprovação.")
+            return
+        await responder.send_text(f"📋 {len(pending)} gasto(s) aguardando aprovação:")
+        for e in pending:
+            await responder.send_prompt(
+                InteractivePrompt(
+                    text=await self._format_approval_item(e),
+                    actions=[
+                        PromptAction(f"{_APV_OK}:{e.id}", "✅ Aprovar"),
+                        PromptAction(f"{_APV_NO}:{e.id}", "❌ Rejeitar"),
+                    ],
+                )
+            )
+        if len(pending) > 1:
+            await responder.send_prompt(
+                InteractivePrompt(
+                    text="Ou aprove todos de uma vez:",
+                    actions=[PromptAction(_APV_ALL, f"✅ Aprovar todos ({len(pending)})")],
+                )
+            )
+
+    async def _approve_command(self, ctx, rest, responder) -> None:
+        expense_id = _to_int(rest)
+        if expense_id is None:
+            await responder.send_text("Use: /aprovar <id> (veja /aprovacoes)")
+            return
+        await self._approve_one(ctx, expense_id, responder)
+
+    async def _approve_one(self, ctx, expense_id, responder) -> None:
+        if not await self._require_approver(ctx, responder):
+            return
+        saved = await self._expenses.approve(ctx, expense_id)
+        if saved is None:
+            await responder.send_text("Esse gasto não está mais aguardando aprovação.")
+            return
+        await responder.send_text(f"✅ Gasto #{saved.id} aprovado.\n{self._format_expense(saved)}")
+        await self._notify_author(
+            ctx, saved, f"✅ Seu gasto em {saved.store_name} (R$ {saved.total_amount:.2f}) foi aprovado."
+        )
+
+    async def _approve_all(self, ctx, responder) -> None:
+        if not await self._require_approver(ctx, responder):
+            return
+        approved = await self._expenses.approve_all(ctx)
+        if not approved:
+            await responder.send_text("Nenhum gasto aguardando aprovação.")
+            return
+        await responder.send_text(f"✅ {len(approved)} gasto(s) aprovado(s).")
+        for e in approved:
+            await self._notify_author(
+                ctx, e, f"✅ Seu gasto em {e.store_name} (R$ {e.total_amount:.2f}) foi aprovado."
+            )
+
+    async def _prompt_reject(self, ctx, expense_id, responder) -> None:
+        # A rejeição exige motivo; como o fluxo é stateless, pedimos via comando.
+        if not await self._require_approver(ctx, responder):
+            return
+        if expense_id is None:
+            return
+        await responder.send_text(
+            f"Para rejeitar o gasto #{expense_id}, envie o motivo:\n"
+            f"/rejeitar {expense_id} <motivo>"
+        )
+
+    async def _reject_command(self, ctx, rest, responder) -> None:
+        if not await self._require_approver(ctx, responder):
+            return
+        id_str, _, comment = rest.partition(" ")
+        expense_id = _to_int(id_str)
+        comment = comment.strip()
+        if expense_id is None or not comment:
+            await responder.send_text("Use: /rejeitar <id> <motivo>. O motivo é obrigatório.")
+            return
+        saved = await self._expenses.reject(ctx, expense_id, comment)
+        if saved is None:
+            await responder.send_text("Esse gasto não está mais aguardando aprovação.")
+            return
+        await responder.send_text(f"❌ Gasto #{saved.id} rejeitado.\nMotivo: {comment}")
+        await self._notify_author(
+            ctx,
+            saved,
+            f"❌ Seu gasto em {saved.store_name} (R$ {saved.total_amount:.2f}) foi rejeitado.\n"
+            f"Motivo: {comment}",
+        )
+
+    async def _reimburse_command(self, ctx, rest, responder) -> None:
+        expense_id = _to_int(rest)
+        if expense_id is None:
+            await responder.send_text("Use: /reembolsar <id>")
+            return
+        await self._reimburse(ctx, expense_id, responder)
+
+    async def _reimburse(self, ctx, expense_id, responder) -> None:
+        if not await self._require_approver(ctx, responder):
+            return
+        saved = await self._expenses.mark_reimbursed(ctx, expense_id)
+        if saved is None:
+            await responder.send_text("Só dá para reembolsar um gasto já aprovado.")
+            return
+        await responder.send_text(f"💸 Gasto #{saved.id} marcado como reembolsado.")
+        await self._notify_author(
+            ctx, saved, f"💸 Seu gasto em {saved.store_name} (R$ {saved.total_amount:.2f}) foi reembolsado."
+        )
+
+    async def _my_reimbursements(self, ctx, responder) -> None:
+        items = await self._expenses.list_my_reimbursements(ctx)
+        if not items:
+            await responder.send_text("Você ainda não enviou gastos para reembolso.")
+            return
+        lines = ["🧾 Seus reembolsos:\n"]
+        for e in items:
+            label = _STATUS_LABELS.get(e.status, e.status.value)
+            lines.append(f"#{e.id} {label} — {e.store_name}: R$ {e.total_amount:.2f}")
+            if e.status == ExpenseStatus.REJECTED and e.decision_comment:
+                lines.append(f"    ↳ motivo: {e.decision_comment}")
+        await responder.send_text("\n".join(lines))
+
+    async def _require_approver(self, ctx, responder) -> bool:
+        if await self._org.is_admin(ctx):
+            return True
+        await responder.send_text("Apenas aprovadores (admin/owner) da empresa podem fazer isso.")
+        return False
+
+    # --- Notificações push ---------------------------------------------------
+
+    async def _notify_approvers(self, ctx) -> None:
+        pending = await self._expenses.list_pending_approvals(ctx)
+        contacts = await self._org.approver_external_ids(
+            ctx.org_id, ctx.channel, exclude_user_id=ctx.user_id
+        )
+        text = (
+            f"📥 {ctx.display_name} enviou um gasto para aprovação.\n"
+            f"Você tem {len(pending)} gasto(s) a aprovar. Use /aprovacoes."
+        )
+        for external_id in contacts:
+            await self._notifier.notify(ctx.channel, external_id, text)
+
+    async def _notify_author(self, ctx, expense: Expense, text: str) -> None:
+        external_id = await self._org.external_id_for(expense.user_id, ctx.channel)
+        if external_id is not None:
+            await self._notifier.notify(ctx.channel, external_id, text)
+
+    async def _format_approval_item(self, e: Expense) -> str:
+        author = await self._org.user_name(e.user_id) or f"usuário {e.user_id}"
+        return f"#{e.id} • {author}\n{self._format_expense(e)}"
 
     # --- Relatórios ----------------------------------------------------------
 
@@ -332,7 +534,11 @@ class BotApplication:
             "📂 Categorias/centros (admin): /add_categoria, /add_centro | /categorias, /centros\n\n"
             "💸 Gastos:\n"
             "/gasto <valor> <descrição> - lança um gasto por texto\n"
-            "/listar - últimos gastos | /resumo [meses] - total do período"
+            "/listar - últimos gastos | /resumo [meses] - total do período\n\n"
+            "🧾 Reembolso:\n"
+            "/reembolsos - status dos seus gastos enviados\n"
+            "/aprovacoes - fila de aprovação (aprovadores) | /rejeitar <id> <motivo>\n"
+            "/aprovar <id>, /aprovar_todos, /reembolsar <id> (aprovadores)"
         )
 
 

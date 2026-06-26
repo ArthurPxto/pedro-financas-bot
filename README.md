@@ -115,5 +115,13 @@ docker compose up -d
 - `/add_categoria <nome>`, `/categorias` — categorias da org (a IA sugere dentro delas).
 - `/add_centro <nome>`, `/centros` — centros de custo da org.
 
+**Reembolso / aprovação (Fase 2)**
+- Ao confirmar, o gasto de um **membro** vai para aprovação (`aguardando → aprovado/rejeitado → reembolsado`); quem é **admin/owner** aprova direto (uso pessoal segue sem fricção).
+- `/reembolsos` — funcionário acompanha o status dos seus gastos enviados.
+- `/aprovacoes` — aprovador vê a fila com botões Aprovar/Rejeitar e "Aprovar todos" (aprovação em lote).
+- `/aprovar <id>`, `/aprovar_todos`, `/reembolsar <id>` — ações do aprovador.
+- `/rejeitar <id> <motivo>` — rejeita com **comentário obrigatório**.
+- Aprovadores recebem **notificação push** quando há gastos na fila; o autor é avisado da decisão.
+
 ## 🤝 Contributing
 Contributions, issues, and feature requests are welcome! Feel free to check the issues page.

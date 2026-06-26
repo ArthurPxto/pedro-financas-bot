@@ -134,6 +134,13 @@ class ExpenseModel(Base):
     )
     receipt_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     cost_center: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Decisão de aprovação (Fase 2). Sem FK rígida em approver_id para manter o
+    # padrão leve das outras colunas de usuário; o app garante org/role.
+    approver_id: Mapped[int | None] = mapped_column(nullable=True)
+    decision_comment: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

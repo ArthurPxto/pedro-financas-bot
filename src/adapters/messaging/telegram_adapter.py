@@ -25,6 +25,7 @@ from src.core.ports.messaging import (
     MessageHandler as CoreHandler,
     MessagingChannel,
 )
+from src.core.ports.notifications import Notifier
 from src.logging_config import get_logger
 
 log = get_logger(__name__)
@@ -49,7 +50,7 @@ class _TelegramResponder(ChannelResponder):
         )
 
 
-class TelegramChannel(MessagingChannel):
+class TelegramChannel(MessagingChannel, Notifier):
     def __init__(self, token: str):
         self._app = ApplicationBuilder().token(token).build()
         self._handler: CoreHandler | None = None
@@ -57,6 +58,20 @@ class TelegramChannel(MessagingChannel):
     @property
     def channel(self) -> Channel:
         return Channel.TELEGRAM
+
+    # --- Notifier: push proativo (fora de uma conversa em curso) -------------
+
+    async def notify(self, channel: Channel, external_id: str, text: str) -> bool:
+        if channel is not Channel.TELEGRAM:
+            return False
+        try:
+            # Em chat privado o external_id (user id) é o próprio chat id.
+            await self._app.bot.send_message(chat_id=int(external_id), text=text)
+            return True
+        except Exception:
+            # Usuário pode nunca ter iniciado conversa com o bot, ou tê-lo bloqueado.
+            log.warning("falha ao notificar", external_id=external_id)
+            return False
 
     def set_handler(self, handler: CoreHandler) -> None:
         self._handler = handler

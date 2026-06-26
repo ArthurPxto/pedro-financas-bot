@@ -16,6 +16,7 @@ from src.core.entities import (
     ChannelIdentity,
     CostCenter,
     Expense,
+    ExpenseStatus,
     Membership,
     Organization,
     User,
@@ -31,6 +32,17 @@ from src.core.ports.repositories import (
 )
 
 
+# Estados que contam como gasto "real" nos relatórios (/resumo, /listar):
+# confirmado pelo autor e ainda não rejeitado. Rascunho e rejeitado ficam de fora.
+_COUNTED_STATUSES = (
+    ExpenseStatus.SUBMITTED,
+    ExpenseStatus.APPROVED,
+    ExpenseStatus.REIMBURSED,
+)
+# Estados pós-confirmação — a visão "meus reembolsos" mostra todos eles.
+_REIMBURSEMENT_STATUSES = _COUNTED_STATUSES + (ExpenseStatus.REJECTED,)
+
+
 # --- Mappers ORM <-> domínio -------------------------------------------------
 
 def _to_user(row: m.UserModel) -> User:
@@ -42,6 +54,16 @@ def _to_user(row: m.UserModel) -> User:
 def _to_org(row: m.OrganizationModel) -> Organization:
     return Organization(
         id=row.id, name=row.name, join_code=row.join_code, created_at=row.created_at
+    )
+
+
+def _to_identity(row: m.ChannelIdentityModel) -> ChannelIdentity:
+    return ChannelIdentity(
+        id=row.id,
+        user_id=row.user_id,
+        channel=row.channel,
+        external_id=row.external_id,
+        created_at=row.created_at,
     )
 
 
@@ -68,6 +90,9 @@ def _to_expense(row: m.ExpenseModel) -> Expense:
         status=row.status,
         receipt_url=row.receipt_url,
         cost_center=row.cost_center,
+        approver_id=row.approver_id,
+        decision_comment=row.decision_comment,
+        decided_at=row.decided_at,
         created_at=row.created_at,
     )
 
@@ -117,13 +142,17 @@ class SqlAlchemyUserRepository(UserRepository):
         )
         self._session.add(row)
         await self._session.flush()
-        return ChannelIdentity(
-            id=row.id,
-            user_id=row.user_id,
-            channel=row.channel,
-            external_id=row.external_id,
-            created_at=row.created_at,
+        return _to_identity(row)
+
+    async def get_channel_identity(
+        self, user_id: int, channel: Channel
+    ) -> Optional[ChannelIdentity]:
+        stmt = select(m.ChannelIdentityModel).where(
+            m.ChannelIdentityModel.user_id == user_id,
+            m.ChannelIdentityModel.channel == channel,
         )
+        row = (await self._session.execute(stmt)).scalar_one_or_none()
+        return _to_identity(row) if row else None
 
 
 class SqlAlchemyOrganizationRepository(OrganizationRepository):
@@ -190,6 +219,15 @@ class SqlAlchemyMembershipRepository(MembershipRepository):
         )
         row = (await self._session.execute(stmt)).scalar_one_or_none()
         return _to_membership(row) if row else None
+
+    async def list_for_org(self, org_id: int) -> list[Membership]:
+        stmt = (
+            select(m.MembershipModel)
+            .where(m.MembershipModel.org_id == org_id)
+            .order_by(m.MembershipModel.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_membership(r) for r in rows]
 
 
 class SqlAlchemyCategoryRepository(CategoryRepository):
@@ -269,6 +307,9 @@ class SqlAlchemyExpenseRepository(ExpenseRepository):
         row.status = expense.status
         row.receipt_url = expense.receipt_url
         row.cost_center = expense.cost_center
+        row.approver_id = expense.approver_id
+        row.decision_comment = expense.decision_comment
+        row.decided_at = expense.decided_at
         await self._session.flush()
         return _to_expense(row)
 
@@ -283,7 +324,7 @@ class SqlAlchemyExpenseRepository(ExpenseRepository):
             .where(
                 m.ExpenseModel.org_id == org_id,
                 m.ExpenseModel.user_id == user_id,
-                m.ExpenseModel.status == m.ExpenseStatus.REGISTERED,
+                m.ExpenseModel.status.in_(_COUNTED_STATUSES),
             )
             .order_by(m.ExpenseModel.date_at.desc(), m.ExpenseModel.id.desc())
             .limit(limit)
@@ -295,10 +336,38 @@ class SqlAlchemyExpenseRepository(ExpenseRepository):
         stmt = select(func.coalesce(func.sum(m.ExpenseModel.total_amount), 0.0)).where(
             m.ExpenseModel.org_id == org_id,
             m.ExpenseModel.user_id == user_id,
-            m.ExpenseModel.status == m.ExpenseStatus.REGISTERED,
+            m.ExpenseModel.status.in_(_COUNTED_STATUSES),
             m.ExpenseModel.date_at >= since,
         )
         return float((await self._session.execute(stmt)).scalar_one())
+
+    async def list_pending_for_org(self, org_id: int) -> list[Expense]:
+        stmt = (
+            select(m.ExpenseModel)
+            .where(
+                m.ExpenseModel.org_id == org_id,
+                m.ExpenseModel.status == ExpenseStatus.SUBMITTED,
+            )
+            .order_by(m.ExpenseModel.id.asc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_expense(r) for r in rows]
+
+    async def list_for_reimbursements(
+        self, org_id: int, user_id: int, limit: int = 10
+    ) -> list[Expense]:
+        stmt = (
+            select(m.ExpenseModel)
+            .where(
+                m.ExpenseModel.org_id == org_id,
+                m.ExpenseModel.user_id == user_id,
+                m.ExpenseModel.status.in_(_REIMBURSEMENT_STATUSES),
+            )
+            .order_by(m.ExpenseModel.id.desc())
+            .limit(limit)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_expense(r) for r in rows]
 
 
 # --- Unit of Work ------------------------------------------------------------
