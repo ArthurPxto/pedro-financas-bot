@@ -38,6 +38,7 @@ The project follows **ports & adapters (hexagonal)**: the business core depends 
 │   ├── config.py           # Boot-time config (pydantic-settings)
 │   ├── main.py             # Composition root do bot
 │   └── api.py              # Composition root da API web (uvicorn)
+├── web/                    # Painel SPA (React + Vite + TS) — consome src/api.py
 ├── alembic/                # Migrations (async, asyncpg)
 ├── docker-compose.yml      # Local PostgreSQL
 └── requirements.txt
@@ -104,7 +105,14 @@ docker compose up -d
 
 # API do painel web (Fase 3 — processo separado, mesmo banco; requer WEB_JWT_SECRET)
 .venv/bin/python -m src.api    # http://localhost:8000  (/docs para o Swagger)
+
+# Painel web (SPA React/Vite) — consome a API acima
+cd web && npm install && npm run dev   # http://localhost:5173
 ```
+
+> Acesso ao painel: envie `/login` ao bot no Telegram → ele manda um link
+> (`http://localhost:5173/login?token=…`) → abra no navegador. O painel é a
+> visão do **gestor** (admin/owner); o funcionário continua no bot.
 ## 📝 User Commands
 
 **Gastos**
@@ -133,7 +141,8 @@ docker compose up -d
 **Painel web (Fase 3 — backend)**
 - `/login` no bot envia um **magic-link** de acesso (auth pelo canal já linkado; reusa `ChannelIdentity` + o push da Fase 2).
 - API FastAPI (`src.api`), processo separado sobre os **mesmos serviços**: `POST /auth/exchange`, `GET /auth/me`, `GET /reports/overview` (totais por categoria/centro/pessoa/mês), `GET /reports/export.csv`.
-- Relatórios são **só para admin/owner** (visão do gestor); JSON + CORS, prontos para uma SPA. _Frontend (React/Vite), aprovações pela web e export Sheets/PDF ficam para o próximo passo._
+- Relatórios são **só para admin/owner** (visão do gestor); JSON + CORS.
+- **Painel SPA (`web/`, React/Vite):** login pelo magic-link do bot; herói com o total do período + filtros (de/até/status), rankings por categoria/centro/pessoa/mês e exportação CSV. _Aprovações pela web e export Sheets/PDF ficam para o próximo passo._
 
 ## 🤝 Contributing
 Contributions, issues, and feature requests are welcome! Feel free to check the issues page.
