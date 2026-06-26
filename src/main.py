@@ -8,9 +8,11 @@ from src.adapters.ai_engine import GeminiExpenseExtractor
 from src.adapters.messaging.telegram_adapter import TelegramChannel
 from src.adapters.persistence.database import create_engine, create_session_factory
 from src.adapters.persistence.repositories import SqlAlchemyUnitOfWork
+from src.adapters.security.jwt_issuer import JwtTokenIssuer
 from src.adapters.storage.filesystem import FilesystemReceiptStorage
 from src.app import BotApplication
 from src.config import get_settings
+from src.core.services.auth_service import AuthService
 from src.core.services.expense_service import ExpenseService
 from src.core.services.org_service import OrgService
 from src.logging_config import configure_logging, get_logger
@@ -38,7 +40,21 @@ def main() -> None:
     # Serviços (núcleo)
     org_service = OrgService(uow_factory)
     expense_service = ExpenseService(uow_factory, extractor, receipts)
-    app = BotApplication(org_service, expense_service, notifier=channel)
+
+    # Auth do painel web (opcional): habilita o /login no bot se houver segredo.
+    auth_service = (
+        AuthService(JwtTokenIssuer(secret=settings.web_jwt_secret))
+        if settings.web_jwt_secret
+        else None
+    )
+
+    app = BotApplication(
+        org_service,
+        expense_service,
+        notifier=channel,
+        auth_service=auth_service,
+        web_base_url=settings.web_base_url,
+    )
 
     channel.set_handler(app.handle)
 

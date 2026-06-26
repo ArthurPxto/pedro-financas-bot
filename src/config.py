@@ -5,6 +5,7 @@ Nenhum outro módulo deve chamar `os.getenv` diretamente.
 """
 from functools import lru_cache
 from pathlib import Path
+from typing import Optional
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,6 +46,23 @@ class Settings(BaseSettings):
         description="Diretório raiz para comprovantes quando backend=filesystem",
     )
 
+    # --- Painel web / API (Fase 3) ---
+    # Segredo para assinar os tokens JWT do painel. Opcional: o bot sobe sem ele,
+    # mas `/login` e a API exigem que esteja definido.
+    web_jwt_secret: Optional[str] = Field(
+        default=None, description="Segredo HMAC dos JWT do painel web"
+    )
+    web_base_url: str = Field(
+        default="http://localhost:5173",
+        description="URL do frontend (SPA) — base do magic-link enviado pelo canal",
+    )
+    web_cors_origins: str = Field(
+        default="*",
+        description="Origens permitidas no CORS da API, separadas por vírgula",
+    )
+    api_host: str = Field(default="0.0.0.0")
+    api_port: int = Field(default=8000)
+
     # --- Observabilidade ---
     log_level: str = Field(default="INFO")
     log_json: bool = Field(
@@ -56,6 +74,10 @@ class Settings(BaseSettings):
     def alembic_database_url(self) -> str:
         """DSN síncrono para o Alembic (usa psycopg/psycopg2 em vez de asyncpg)."""
         return self.database_url.replace("+asyncpg", "")
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [o.strip() for o in self.web_cors_origins.split(",") if o.strip()]
 
 
 @lru_cache(maxsize=1)

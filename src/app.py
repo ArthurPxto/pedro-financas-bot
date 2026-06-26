@@ -11,7 +11,10 @@ from src.core.ports.messaging import (
     InteractivePrompt,
     PromptAction,
 )
+from typing import Optional
+
 from src.core.ports.notifications import Notifier
+from src.core.services.auth_service import AuthService
 from src.core.services.expense_service import ExpenseService
 from src.core.services.org_service import OrgService, UserContext
 from src.logging_config import get_logger
@@ -47,10 +50,14 @@ class BotApplication:
         org_service: OrgService,
         expense_service: ExpenseService,
         notifier: Notifier,
+        auth_service: Optional[AuthService] = None,
+        web_base_url: str = "",
     ):
         self._org = org_service
         self._expenses = expense_service
         self._notifier = notifier
+        self._auth = auth_service
+        self._web_base_url = web_base_url.rstrip("/")
 
     async def handle(self, message: IncomingMessage, responder: ChannelResponder) -> None:
         ctx = await self._org.resolve_context(
@@ -93,6 +100,7 @@ class BotApplication:
             "rejeitar": lambda: self._reject_command(ctx, rest, responder),
             "reembolsar": lambda: self._reimburse_command(ctx, rest, responder),
             "reembolsos": lambda: self._my_reimbursements(ctx, responder),
+            "login": lambda: self._web_login(ctx, responder),
         }
         handler = handlers.get(command)
         if handler:
@@ -448,6 +456,19 @@ class BotApplication:
                 lines.append(f"    ↳ motivo: {e.decision_comment}")
         await responder.send_text("\n".join(lines))
 
+    # --- Acesso ao painel web ------------------------------------------------
+
+    async def _web_login(self, ctx, responder) -> None:
+        if self._auth is None or not self._web_base_url:
+            await responder.send_text("O painel web ainda não está configurado.")
+            return
+        token = self._auth.create_login_token(ctx.user_id)
+        await responder.send_text(
+            "🔐 Seu acesso ao painel (expira em 10 min):\n"
+            f"{self._web_base_url}/login?token={token}\n\n"
+            "Abra no navegador. Não compartilhe — é a sua chave de acesso."
+        )
+
     async def _require_approver(self, ctx, responder) -> bool:
         if await self._org.is_admin(ctx):
             return True
@@ -538,7 +559,8 @@ class BotApplication:
             "🧾 Reembolso:\n"
             "/reembolsos - status dos seus gastos enviados\n"
             "/aprovacoes - fila de aprovação (aprovadores) | /rejeitar <id> <motivo>\n"
-            "/aprovar <id>, /aprovar_todos, /reembolsar <id> (aprovadores)"
+            "/aprovar <id>, /aprovar_todos, /reembolsar <id> (aprovadores)\n\n"
+            "📊 Painel web: /login - link de acesso aos relatórios"
         )
 
 

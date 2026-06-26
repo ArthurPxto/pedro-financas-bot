@@ -31,10 +31,13 @@ The project follows **ports & adapters (hexagonal)**: the business core depends 
 │   │   ├── ai_engine.py    # Gemini extractor
 │   │   ├── persistence/    # SQLAlchemy models + repositories + async engine
 │   │   ├── storage/        # Receipt storage (filesystem; S3 later)
-│   │   └── messaging/      # Telegram adapter (all python-telegram-bot lives here)
+│   │   ├── messaging/      # Telegram adapter (all python-telegram-bot lives here)
+│   │   ├── security/       # JwtTokenIssuer (TokenIssuer via PyJWT)
+│   │   └── web/            # FastAPI API do painel (driving adapter)
 │   ├── app.py              # Channel-neutral router (BotApplication)
 │   ├── config.py           # Boot-time config (pydantic-settings)
-│   └── main.py             # Composition root (wires adapters → services)
+│   ├── main.py             # Composition root do bot
+│   └── api.py              # Composition root da API web (uvicorn)
 ├── alembic/                # Migrations (async, asyncpg)
 ├── docker-compose.yml      # Local PostgreSQL
 └── requirements.txt
@@ -96,7 +99,11 @@ docker compose up -d
 
 ### 5. Running the application
 ```bash
+# Bot do Telegram
 .venv/bin/python -m src.main
+
+# API do painel web (Fase 3 — processo separado, mesmo banco; requer WEB_JWT_SECRET)
+.venv/bin/python -m src.api    # http://localhost:8000  (/docs para o Swagger)
 ```
 ## 📝 User Commands
 
@@ -122,6 +129,11 @@ docker compose up -d
 - `/aprovar <id>`, `/aprovar_todos`, `/reembolsar <id>` — ações do aprovador.
 - `/rejeitar <id> <motivo>` — rejeita com **comentário obrigatório**.
 - Aprovadores recebem **notificação push** quando há gastos na fila; o autor é avisado da decisão.
+
+**Painel web (Fase 3 — backend)**
+- `/login` no bot envia um **magic-link** de acesso (auth pelo canal já linkado; reusa `ChannelIdentity` + o push da Fase 2).
+- API FastAPI (`src.api`), processo separado sobre os **mesmos serviços**: `POST /auth/exchange`, `GET /auth/me`, `GET /reports/overview` (totais por categoria/centro/pessoa/mês), `GET /reports/export.csv`.
+- Relatórios são **só para admin/owner** (visão do gestor); JSON + CORS, prontos para uma SPA. _Frontend (React/Vite), aprovações pela web e export Sheets/PDF ficam para o próximo passo._
 
 ## 🤝 Contributing
 Contributions, issues, and feature requests are welcome! Feel free to check the issues page.

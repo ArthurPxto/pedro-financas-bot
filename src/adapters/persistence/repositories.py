@@ -369,6 +369,37 @@ class SqlAlchemyExpenseRepository(ExpenseRepository):
         rows = (await self._session.execute(stmt)).scalars().all()
         return [_to_expense(r) for r in rows]
 
+    async def list_filtered(
+        self,
+        org_id,
+        *,
+        date_from=None,
+        date_to=None,
+        statuses=None,
+        category=None,
+        cost_center=None,
+        user_id=None,
+    ):
+        conditions = [m.ExpenseModel.org_id == org_id]
+        conditions.append(m.ExpenseModel.status.in_(statuses or _COUNTED_STATUSES))
+        if date_from is not None:
+            conditions.append(m.ExpenseModel.date_at >= date_from)
+        if date_to is not None:
+            conditions.append(m.ExpenseModel.date_at <= date_to)
+        if category is not None:
+            conditions.append(m.ExpenseModel.category == category)
+        if cost_center is not None:
+            conditions.append(m.ExpenseModel.cost_center == cost_center)
+        if user_id is not None:
+            conditions.append(m.ExpenseModel.user_id == user_id)
+        stmt = (
+            select(m.ExpenseModel)
+            .where(*conditions)
+            .order_by(m.ExpenseModel.date_at.desc(), m.ExpenseModel.id.desc())
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        return [_to_expense(r) for r in rows]
+
 
 # --- Unit of Work ------------------------------------------------------------
 
