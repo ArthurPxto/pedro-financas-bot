@@ -36,7 +36,11 @@ class ExpenseService:
         O rascunho fica PENDING_REVIEW até o usuário confirmar — base para a
         revisão antes de salvar e para o fluxo de reembolso (comprovante auditável).
         """
-        extracted = await self._extractor.extract(image, mime_type)
+        # A IA sugere a categoria dentro da lista da org (se houver), em vez de inventar.
+        async with self._uow_factory() as uow:
+            categories = [c.name for c in await uow.categories.list_for_org(ctx.org_id)]
+
+        extracted = await self._extractor.extract(image, mime_type, categories=categories)
 
         receipt_url = await self._receipts.save(
             image,
@@ -60,6 +64,28 @@ class ExpenseService:
             saved = await uow.expenses.add(expense)
             await uow.commit()
         log.info("draft criado", expense_id=saved.id, org_id=ctx.org_id, user_id=ctx.user_id)
+        return saved
+
+    async def create_manual_draft(
+        self, ctx: UserContext, amount: float, description: str, category: str = "Outros"
+    ) -> Expense:
+        """Cria um rascunho a partir de texto (`/gasto`), sem comprovante.
+
+        Nem todo gasto tem nota fotografável; passa pelo mesmo passo de revisão.
+        """
+        expense = Expense(
+            org_id=ctx.org_id,
+            user_id=ctx.user_id,
+            store_name=description.strip() or "Gasto",
+            total_amount=amount,
+            category=category,
+            date=date.today(),
+            status=ExpenseStatus.PENDING_REVIEW,
+        )
+        async with self._uow_factory() as uow:
+            saved = await uow.expenses.add(expense)
+            await uow.commit()
+        log.info("draft manual criado", expense_id=saved.id, org_id=ctx.org_id)
         return saved
 
     async def confirm(self, ctx: UserContext, expense_id: int) -> Optional[Expense]:
@@ -87,6 +113,44 @@ class ExpenseService:
             await uow.commit()
         log.info("rascunho cancelado", expense_id=expense_id)
         return True
+
+    async def get_draft(self, ctx: UserContext, expense_id: int) -> Optional[Expense]:
+        async with self._uow_factory() as uow:
+            expense = await uow.expenses.get(expense_id)
+            return expense if self._is_actionable_draft(ctx, expense) else None
+
+    async def set_category(
+        self, ctx: UserContext, expense_id: int, category: str
+    ) -> Optional[Expense]:
+        """Edita a categoria de um rascunho em revisão (botão inline)."""
+        return await self._edit_draft(ctx, expense_id, category=category)
+
+    async def set_cost_center(
+        self, ctx: UserContext, expense_id: int, cost_center: str
+    ) -> Optional[Expense]:
+        """Atribui o centro de custo de um rascunho em revisão (botão inline)."""
+        return await self._edit_draft(ctx, expense_id, cost_center=cost_center)
+
+    async def _edit_draft(
+        self,
+        ctx: UserContext,
+        expense_id: int,
+        *,
+        category: Optional[str] = None,
+        cost_center: Optional[str] = None,
+    ) -> Optional[Expense]:
+        async with self._uow_factory() as uow:
+            expense = await uow.expenses.get(expense_id)
+            if not self._is_actionable_draft(ctx, expense):
+                return None
+            if category is not None:
+                expense.category = category
+            if cost_center is not None:
+                expense.cost_center = cost_center
+            saved = await uow.expenses.update(expense)
+            await uow.commit()
+        log.info("rascunho editado", expense_id=expense_id, category=category, cost_center=cost_center)
+        return saved
 
     async def list_recent(self, ctx: UserContext, limit: int = 5) -> list[Expense]:
         async with self._uow_factory() as uow:

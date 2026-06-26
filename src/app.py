@@ -2,10 +2,9 @@
 
 Implementa a assinatura `MessageHandler`: recebe `IncomingMessage` + `ChannelResponder`
 e orquestra `OrgService`/`ExpenseService`. Não conhece Telegram nem WhatsApp — só fala
-em termos de mensagens normalizadas e prompts interativos abstratos. É este o ponto que
-a futura API web também poderá reaproveitar (ou chamar os serviços diretamente).
+em termos de mensagens normalizadas e prompts interativos abstratos.
 """
-from src.core.entities import Expense
+from src.core.entities import Expense, Role
 from src.core.ports.messaging import (
     ChannelResponder,
     IncomingMessage,
@@ -19,8 +18,13 @@ from src.logging_config import get_logger
 log = get_logger(__name__)
 
 # Chaves de ação neutras devolvidas pelos prompts (cabem nos 64 bytes do Telegram).
-_CONFIRM = "exp_ok:"
-_CANCEL = "exp_no:"
+# Formato: "<verbo>:<expense_id>[:<índice>]".
+_CONFIRM = "exp_ok"
+_DELETE = "exp_no"
+_OPEN_CAT = "exp_cat"   # abre o seletor de categoria
+_OPEN_CC = "exp_cc"     # abre o seletor de centro de custo
+_SET_CAT = "setcat"     # setcat:<id>:<idx>
+_SET_CC = "setcc"       # setcc:<id>:<idx>
 
 
 class BotApplication:
@@ -40,11 +44,145 @@ class BotApplication:
         elif message.text:
             await self._handle_text(ctx, message.text, responder)
 
-    # --- Fluxos --------------------------------------------------------------
+    # --- Comandos de texto ---------------------------------------------------
 
-    async def _handle_photo(
-        self, ctx: UserContext, message: IncomingMessage, responder: ChannelResponder
+    async def _handle_text(
+        self, ctx: UserContext, text: str, responder: ChannelResponder
     ) -> None:
+        command, _, rest = text.strip().partition(" ")
+        command = command.lower().lstrip("/").split("@")[0]
+        rest = rest.strip()
+
+        handlers = {
+            "start": lambda: responder.send_text(self._start_message(ctx.display_name)),
+            "resumo": lambda: self._reply_summary(ctx, rest, responder),
+            "listar": lambda: self._reply_recent(ctx, responder),
+            "criar_empresa": lambda: self._create_org(ctx, rest, responder),
+            "entrar": lambda: self._join_org(ctx, rest, responder),
+            "empresa": lambda: self._show_org(ctx, responder),
+            "empresas": lambda: self._list_orgs(ctx, responder),
+            "trocar": lambda: self._switch_org(ctx, rest, responder),
+            "gasto": lambda: self._manual_expense(ctx, rest, responder),
+            "categorias": lambda: self._list_categories(ctx, responder),
+            "add_categoria": lambda: self._add_category(ctx, rest, responder),
+            "centros": lambda: self._list_cost_centers(ctx, responder),
+            "add_centro": lambda: self._add_cost_center(ctx, rest, responder),
+        }
+        handler = handlers.get(command)
+        if handler:
+            await handler()
+        else:
+            await responder.send_text(
+                "Envie a foto de um comprovante, ou use /gasto, /resumo, /listar, "
+                "/empresa ou /start."
+            )
+
+    # --- Onboarding ----------------------------------------------------------
+
+    async def _create_org(self, ctx, name, responder) -> None:
+        if not name:
+            await responder.send_text("Use: /criar_empresa <nome da empresa>")
+            return
+        org = await self._org.create_organization(ctx, name)
+        await responder.send_text(
+            f"🏢 Empresa *{org.name}* criada! Você é admin.\n"
+            f"Código de convite: `{org.join_code}`\n"
+            f"Compartilhe com a equipe: cada pessoa envia `/entrar {org.join_code}`.\n\n"
+            f"Seus gastos agora vão para esta empresa."
+        )
+
+    async def _join_org(self, ctx, code, responder) -> None:
+        if not code:
+            await responder.send_text("Use: /entrar <código>")
+            return
+        org = await self._org.join_organization(ctx, code)
+        if org is None:
+            await responder.send_text("Código inválido. Confira com o admin da empresa.")
+            return
+        await responder.send_text(
+            f"✅ Você entrou em *{org.name}*. Seus gastos agora vão para esta empresa."
+        )
+
+    async def _show_org(self, ctx, responder) -> None:
+        orgs = await self._org.list_organizations(ctx)
+        active = next((o for o, _ in orgs if o.id == ctx.org_id), None)
+        role = next((r for o, r in orgs if o.id == ctx.org_id), None)
+        if active is None:
+            await responder.send_text("Nenhuma empresa ativa.")
+            return
+        lines = [f"🏢 Empresa ativa: *{active.name}* ({role.value if role else '—'})"]
+        if role in (Role.OWNER, Role.ADMIN) and active.join_code:
+            lines.append(f"Código de convite: `{active.join_code}`")
+        await responder.send_text("\n".join(lines))
+
+    async def _list_orgs(self, ctx, responder) -> None:
+        orgs = await self._org.list_organizations(ctx)
+        lines = ["🏢 Suas empresas (use /trocar <id>):\n"]
+        for org, role in orgs:
+            marker = "👉 " if org.id == ctx.org_id else "   "
+            lines.append(f"{marker}[{org.id}] {org.name} ({role.value})")
+        await responder.send_text("\n".join(lines))
+
+    async def _switch_org(self, ctx, arg, responder) -> None:
+        try:
+            org_id = int(arg)
+        except ValueError:
+            await responder.send_text("Use: /trocar <id> (veja /empresas)")
+            return
+        if await self._org.switch_active(ctx, org_id):
+            await responder.send_text("✅ Empresa ativa alterada.")
+        else:
+            await responder.send_text("Você não é membro dessa empresa.")
+
+    # --- Categorias / centros de custo --------------------------------------
+
+    async def _list_categories(self, ctx, responder) -> None:
+        cats = await self._org.list_categories(ctx)
+        if cats:
+            await responder.send_text("📂 Categorias da empresa:\n" + "\n".join(f"• {c}" for c in cats))
+        else:
+            await responder.send_text("Nenhuma categoria definida. Admin: /add_categoria <nome>")
+
+    async def _add_category(self, ctx, name, responder) -> None:
+        if not name:
+            await responder.send_text("Use: /add_categoria <nome>")
+            return
+        result = await self._org.add_category(ctx, name)
+        await responder.send_text(
+            f"📂 Categoria '{result.name}' adicionada." if result
+            else "Apenas admins podem gerenciar categorias."
+        )
+
+    async def _list_cost_centers(self, ctx, responder) -> None:
+        ccs = await self._org.list_cost_centers(ctx)
+        if ccs:
+            await responder.send_text("🏢 Centros de custo:\n" + "\n".join(f"• {c}" for c in ccs))
+        else:
+            await responder.send_text("Nenhum centro de custo. Admin: /add_centro <nome>")
+
+    async def _add_cost_center(self, ctx, name, responder) -> None:
+        if not name:
+            await responder.send_text("Use: /add_centro <nome>")
+            return
+        result = await self._org.add_cost_center(ctx, name)
+        await responder.send_text(
+            f"🏢 Centro de custo '{result.name}' adicionado." if result
+            else "Apenas admins podem gerenciar centros de custo."
+        )
+
+    # --- Gastos --------------------------------------------------------------
+
+    async def _manual_expense(self, ctx, rest, responder) -> None:
+        amount_str, _, description = rest.partition(" ")
+        try:
+            amount = float(amount_str.replace(",", "."))
+        except ValueError:
+            await responder.send_text("Use: /gasto <valor> <descrição>. Ex: /gasto 50 mercado almoço")
+            return
+        draft = await self._expenses.create_manual_draft(ctx, amount, description)
+        await self._send_draft_prompt(ctx, draft, responder)
+
+    async def _handle_photo(self, ctx, message, responder) -> None:
         await responder.send_text("Recebi a foto! Processando os dados com IA... 🤖")
         media = message.media[0]
         try:
@@ -53,52 +191,93 @@ class BotApplication:
             log.exception("falha ao extrair gasto da imagem", user_id=ctx.user_id)
             await responder.send_text("⚠️ Não consegui ler o comprovante. Tente outra foto.")
             return
+        await self._send_draft_prompt(ctx, draft, responder)
 
+    async def _send_draft_prompt(self, ctx, draft: Expense, responder) -> None:
         await responder.send_prompt(
             InteractivePrompt(
                 text=self._format_draft(draft),
                 actions=[
-                    PromptAction(f"{_CONFIRM}{draft.id}", "✅ Confirmar"),
-                    PromptAction(f"{_CANCEL}{draft.id}", "❌ Cancelar"),
+                    PromptAction(f"{_CONFIRM}:{draft.id}", "✅ Confirmar"),
+                    PromptAction(f"{_OPEN_CAT}:{draft.id}", "📂 Categoria"),
+                    PromptAction(f"{_OPEN_CC}:{draft.id}", "🏢 Centro de custo"),
+                    PromptAction(f"{_DELETE}:{draft.id}", "❌ Excluir"),
                 ],
             )
         )
 
-    async def _handle_action(
-        self, ctx: UserContext, action: str, responder: ChannelResponder
-    ) -> None:
-        if action.startswith(_CONFIRM):
-            expense_id = self._parse_id(action, _CONFIRM)
-            saved = await self._expenses.confirm(ctx, expense_id) if expense_id else None
-            if saved:
-                await responder.send_text(f"✅ Gasto registrado!\n{self._format_expense(saved)}")
-            else:
-                await responder.send_text("Não encontrei esse rascunho para confirmar.")
-        elif action.startswith(_CANCEL):
-            expense_id = self._parse_id(action, _CANCEL)
-            ok = await self._expenses.cancel(ctx, expense_id) if expense_id else False
-            await responder.send_text("🗑️ Gasto descartado." if ok else "Nada a descartar.")
+    # --- Ações de prompt (callbacks) ----------------------------------------
 
-    async def _handle_text(
-        self, ctx: UserContext, text: str, responder: ChannelResponder
-    ) -> None:
-        command, _, rest = text.strip().partition(" ")
-        command = command.lower().lstrip("/")
+    async def _handle_action(self, ctx: UserContext, action: str, responder) -> None:
+        verb, _, args = action.partition(":")
 
-        if command == "start":
-            await responder.send_text(self._start_message(ctx.display_name))
-        elif command == "resumo":
-            await self._reply_summary(ctx, rest.strip(), responder)
-        elif command == "listar":
-            await self._reply_recent(ctx, responder)
-        else:
+        if verb == _CONFIRM:
+            saved = await self._expenses.confirm(ctx, _to_int(args))
             await responder.send_text(
-                "Envie a foto de um comprovante, ou use /resumo, /listar ou /start."
+                f"✅ Gasto registrado!\n{self._format_expense(saved)}" if saved
+                else "Não encontrei esse rascunho para confirmar."
             )
+        elif verb == _DELETE:
+            ok = await self._expenses.cancel(ctx, _to_int(args))
+            await responder.send_text("🗑️ Gasto excluído." if ok else "Nada a excluir.")
+        elif verb == _OPEN_CAT:
+            await self._open_picker(ctx, _to_int(args), responder, kind="cat")
+        elif verb == _OPEN_CC:
+            await self._open_picker(ctx, _to_int(args), responder, kind="cc")
+        elif verb in (_SET_CAT, _SET_CC):
+            await self._apply_picker(ctx, verb, args, responder)
 
-    async def _reply_summary(
-        self, ctx: UserContext, arg: str, responder: ChannelResponder
-    ) -> None:
+    async def _open_picker(self, ctx, expense_id, responder, *, kind: str) -> None:
+        if expense_id is None or await self._expenses.get_draft(ctx, expense_id) is None:
+            await responder.send_text("Esse rascunho não está mais disponível para edição.")
+            return
+        options = (
+            await self._org.list_categories(ctx) if kind == "cat"
+            else await self._org.list_cost_centers(ctx)
+        )
+        if not options:
+            label = "categoria" if kind == "cat" else "centro de custo"
+            await responder.send_text(f"Nenhum(a) {label} definido(a). Admin pode adicionar.")
+            return
+        prefix = _SET_CAT if kind == "cat" else _SET_CC
+        title = "Escolha a categoria:" if kind == "cat" else "Escolha o centro de custo:"
+        await responder.send_prompt(
+            InteractivePrompt(
+                text=title,
+                actions=[
+                    PromptAction(f"{prefix}:{expense_id}:{idx}", name)
+                    for idx, name in enumerate(options)
+                ],
+            )
+        )
+
+    async def _apply_picker(self, ctx, verb, args, responder) -> None:
+        id_str, _, idx_str = args.partition(":")
+        expense_id, idx = _to_int(id_str), _to_int(idx_str)
+        if expense_id is None or idx is None:
+            return
+        is_cat = verb == _SET_CAT
+        options = (
+            await self._org.list_categories(ctx) if is_cat
+            else await self._org.list_cost_centers(ctx)
+        )
+        if idx >= len(options):
+            await responder.send_text("Opção indisponível, tente novamente.")
+            return
+        value = options[idx]
+        updated = (
+            await self._expenses.set_category(ctx, expense_id, value) if is_cat
+            else await self._expenses.set_cost_center(ctx, expense_id, value)
+        )
+        if updated is None:
+            await responder.send_text("Esse rascunho não está mais disponível para edição.")
+            return
+        # Reapresenta o rascunho atualizado para o usuário continuar ou confirmar.
+        await self._send_draft_prompt(ctx, updated, responder)
+
+    # --- Relatórios ----------------------------------------------------------
+
+    async def _reply_summary(self, ctx, arg, responder) -> None:
         months = 1
         if arg:
             try:
@@ -113,7 +292,7 @@ class BotApplication:
             f"💰 Total acumulado: R$ {total:.2f}"
         )
 
-    async def _reply_recent(self, ctx: UserContext, responder: ChannelResponder) -> None:
+    async def _reply_recent(self, ctx, responder) -> None:
         expenses = await self._expenses.list_recent(ctx)
         if not expenses:
             await responder.send_text("Nenhum gasto encontrado.")
@@ -127,32 +306,38 @@ class BotApplication:
 
     @staticmethod
     def _format_expense(e: Expense) -> str:
-        return (
-            f"📍 {e.store_name}\n"
-            f"💰 R$ {e.total_amount:.2f}\n"
-            f"📂 {e.category}\n"
-            f"📅 Data: {e.date.strftime('%d/%m/%Y')}"
-        )
+        lines = [
+            f"📍 {e.store_name}",
+            f"💰 R$ {e.total_amount:.2f}",
+            f"📂 {e.category}",
+            f"📅 Data: {e.date.strftime('%d/%m/%Y')}",
+        ]
+        if e.cost_center:
+            lines.append(f"🏢 Centro de custo: {e.cost_center}")
+        return "\n".join(lines)
 
     def _format_draft(self, e: Expense) -> str:
-        return "Confira o gasto extraído:\n\n" + self._format_expense(e) + "\n\nConfirmar?"
-
-    @staticmethod
-    def _parse_id(action: str, prefix: str) -> int | None:
-        try:
-            return int(action[len(prefix):])
-        except ValueError:
-            return None
+        return "Confira o gasto:\n\n" + self._format_expense(e) + "\n\nConfirmar ou editar?"
 
     @staticmethod
     def _start_message(name: str) -> str:
         return (
-            f"Olá, {name}! 👋 Bem-vindo ao seu Assistente Financeiro.\n\n"
-            "📸 Envie a foto de um comprovante e eu extraio valor, loja, data e categoria — "
-            "você confirma antes de salvar.\n\n"
-            "🚀 Comandos:\n"
-            "/listar - últimos gastos\n"
-            "/resumo - total do último mês\n"
-            "/resumo 3 - total dos últimos 3 meses\n"
-            "/start - esta mensagem"
+            f"Olá, {name}! 👋 Sou seu assistente de finanças.\n\n"
+            "📸 Envie a foto de um comprovante (ou use /gasto para lançar por texto) — "
+            "você confirma e pode editar categoria/centro de custo antes de salvar.\n\n"
+            "🏢 Equipe:\n"
+            "/criar_empresa <nome> - cria uma empresa (você vira admin)\n"
+            "/entrar <código> - entra numa empresa pelo código\n"
+            "/empresa - empresa ativa e papel | /empresas, /trocar <id>\n\n"
+            "📂 Categorias/centros (admin): /add_categoria, /add_centro | /categorias, /centros\n\n"
+            "💸 Gastos:\n"
+            "/gasto <valor> <descrição> - lança um gasto por texto\n"
+            "/listar - últimos gastos | /resumo [meses] - total do período"
         )
+
+
+def _to_int(value: str):
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return None

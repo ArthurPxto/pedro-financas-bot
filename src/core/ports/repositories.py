@@ -8,8 +8,10 @@ from datetime import date
 from typing import Optional
 
 from src.core.entities import (
+    Category,
     Channel,
     ChannelIdentity,
+    CostCenter,
     Expense,
     Membership,
     Organization,
@@ -25,11 +27,19 @@ class UserRepository(ABC):
         ...
 
     @abstractmethod
+    async def get(self, user_id: int) -> Optional[User]:
+        ...
+
+    @abstractmethod
     async def add(self, user: User) -> User:
         ...
 
     @abstractmethod
     async def add_channel_identity(self, identity: ChannelIdentity) -> ChannelIdentity:
+        ...
+
+    @abstractmethod
+    async def set_active_org(self, user_id: int, org_id: int) -> None:
         ...
 
 
@@ -39,16 +49,49 @@ class OrganizationRepository(ABC):
         ...
 
     @abstractmethod
-    async def get_primary_for_user(self, user_id: int) -> Optional[Organization]:
-        """Org principal de um usuário (a mais antiga em que ele é membro).
+    async def get(self, org_id: int) -> Optional[Organization]:
+        ...
 
-        Na Fase 0 cada usuário tem uma única org pessoal; multi-org chega depois.
-        """
+    @abstractmethod
+    async def get_primary_for_user(self, user_id: int) -> Optional[Organization]:
+        """Org principal de um usuário (a mais antiga em que ele é membro)."""
+
+    @abstractmethod
+    async def get_by_join_code(self, join_code: str) -> Optional[Organization]:
+        ...
+
+    @abstractmethod
+    async def list_for_user(self, user_id: int) -> list[Organization]:
+        ...
 
 
 class MembershipRepository(ABC):
     @abstractmethod
     async def add(self, membership: Membership) -> Membership:
+        ...
+
+    @abstractmethod
+    async def get(self, org_id: int, user_id: int) -> Optional[Membership]:
+        ...
+
+
+class CategoryRepository(ABC):
+    @abstractmethod
+    async def add(self, category: Category) -> Category:
+        ...
+
+    @abstractmethod
+    async def list_for_org(self, org_id: int) -> list[Category]:
+        ...
+
+
+class CostCenterRepository(ABC):
+    @abstractmethod
+    async def add(self, cost_center: CostCenter) -> CostCenter:
+        ...
+
+    @abstractmethod
+    async def list_for_org(self, org_id: int) -> list[CostCenter]:
         ...
 
 
@@ -89,6 +132,8 @@ class UnitOfWork(ABC):
     organizations: OrganizationRepository
     memberships: MembershipRepository
     expenses: ExpenseRepository
+    categories: CategoryRepository
+    cost_centers: CostCenterRepository
 
     @abstractmethod
     async def __aenter__(self) -> "UnitOfWork":
