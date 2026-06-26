@@ -140,6 +140,20 @@ class ExpenseRepository(ABC):
     ) -> list[Expense]:
         """Gastos do usuário já submetidos (qualquer estado de reembolso), recentes."""
 
+    @abstractmethod
+    async def list_filtered(
+        self,
+        org_id: int,
+        *,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        statuses: Optional[list] = None,
+        category: Optional[str] = None,
+        cost_center: Optional[str] = None,
+        user_id: Optional[int] = None,
+    ) -> list[Expense]:
+        """Gastos da org filtrados (base dos relatórios e da exportação do painel)."""
+
 
 class UnitOfWork(ABC):
     """Transação que agrupa os repositórios.

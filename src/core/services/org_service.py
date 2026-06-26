@@ -40,7 +40,8 @@ class UserContext:
     user_id: int
     org_id: int
     display_name: str
-    channel: Channel
+    # None no acesso web (não há canal de origem); preenchido no acesso por canal.
+    channel: Optional[Channel] = None
 
 
 class OrgService:
@@ -76,6 +77,24 @@ class OrgService:
             )
             await uow.commit()
             return UserContext(user.id, org.id, display_name, channel)
+
+    async def web_context(self, user_id: int) -> Optional[UserContext]:
+        """Contexto a partir de um `user_id` autenticado pela web (sem canal).
+
+        Usa a org ativa; cai na org mais antiga se não houver ativa. None se o
+        usuário não existir ou não tiver nenhuma org.
+        """
+        async with self._uow_factory() as uow:
+            user = await uow.users.get(user_id)
+            if user is None:
+                return None
+            org_id = user.active_org_id
+            if org_id is None:
+                org = await uow.organizations.get_primary_for_user(user_id)
+                if org is None:
+                    return None
+                org_id = org.id
+            return UserContext(user.id, org_id, user.name, None)
 
     # --- Aprovadores (para notificação push) --------------------------------
 
