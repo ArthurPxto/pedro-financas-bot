@@ -1,0 +1,351 @@
+/* ============================================================
+   Pedro Finanças — Painel
+   Conceito: "livro-razão / nota de débito viva". O total do período é o
+   herói tipográfico (Fraunces) com uma régua verde de "fechamento de conta";
+   os rankings são linhas de ledger com figuras tabulares (JetBrains Mono).
+   ============================================================ */
+
+:root {
+  --paper: #f3f2f8;
+  --surface: #ffffff;
+  --ink: #1b1830;
+  --muted: #6c6781;
+  --line: #e7e3f1;
+  --brand: #4a2fc4;
+  --brand-700: #3a2399;
+  --brand-bar-2: #8b73ec;
+  --brand-tint: #efecfc;
+  --bottom-line: #0f9d6b; /* verde "fechou no positivo" — usado só na régua do herói */
+  --danger: #c0392b;
+
+  --font-display: "Fraunces", Georgia, serif;
+  --font-ui: "Archivo", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --radius: 16px;
+  --shadow: 0 1px 2px rgba(27, 24, 48, 0.05), 0 10px 30px rgba(27, 24, 48, 0.06);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+code {
+  font-family: var(--font-mono);
+  background: var(--brand-tint);
+  color: var(--brand-700);
+  padding: 0.1em 0.4em;
+  border-radius: 6px;
+  font-size: 0.92em;
+}
+
+/* --- Wordmark ------------------------------------------------ */
+.wordmark {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+.wordmark-mark {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 0.95rem;
+  color: #fff;
+  background: var(--brand);
+  width: 2rem;
+  height: 2rem;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  letter-spacing: -0.02em;
+}
+.wordmark-name {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* --- Splash / gate (login, sem permissão) ------------------- */
+.splash {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  padding: 2rem;
+  text-align: center;
+}
+.gate {
+  max-width: 30rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 2.25rem;
+}
+.gate h1 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.6rem;
+  margin: 0 0 0.75rem;
+}
+.gate p {
+  color: var(--muted);
+  line-height: 1.55;
+  margin: 0.5rem 0 0;
+}
+.gate-note {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px dashed var(--line);
+  font-size: 0.9rem;
+}
+
+/* --- App shell ---------------------------------------------- */
+.app {
+  min-height: 100dvh;
+}
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1rem 1.5rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+.org-name {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.content {
+  max-width: 64rem;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 4rem;
+}
+
+/* --- Buttons ------------------------------------------------ */
+.btn-primary,
+.btn-ghost {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 0.9rem;
+  border-radius: 10px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  padding: 0.6rem 1rem;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+}
+.btn-primary {
+  background: var(--brand);
+  color: #fff;
+}
+.btn-primary:hover {
+  background: var(--brand-700);
+}
+.btn-primary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--muted);
+  border-color: var(--line);
+}
+.btn-ghost:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}
+
+/* --- Hero --------------------------------------------------- */
+.hero {
+  margin-bottom: 2.5rem;
+}
+.hero-eyebrow {
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 0 0 0.5rem;
+}
+.hero-total {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(3rem, 9vw, 5.5rem);
+  line-height: 0.98;
+  letter-spacing: -0.02em;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+.hero-rule {
+  height: 4px;
+  width: 4.5rem;
+  background: var(--bottom-line);
+  border-radius: 999px;
+  margin: 0.9rem 0 0.6rem;
+}
+.hero-sub {
+  margin: 0;
+  color: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+/* --- Filters ------------------------------------------------ */
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.85rem;
+  margin-top: 1.75rem;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.field span {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 600;
+}
+.field input,
+.field select {
+  font-family: var(--font-ui);
+  font-size: 0.92rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.55rem 0.7rem;
+}
+.field input:focus,
+.field select:focus,
+.btn-primary:focus-visible,
+.btn-ghost:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+.filters .btn-primary {
+  margin-left: auto;
+}
+
+/* --- Cards / grid ------------------------------------------- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: 1.25rem;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.4rem 1.5rem;
+}
+.card-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.1rem;
+  margin: 0 0 0.85rem;
+}
+
+/* --- Ledger ranking ----------------------------------------- */
+.rank {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.rank-row {
+  padding: 0.7rem 0;
+  border-bottom: 1px solid var(--line);
+}
+.rank-row:last-child {
+  border-bottom: none;
+}
+.rank-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+}
+.rank-label {
+  font-weight: 500;
+}
+.rank-value {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.rank-bar {
+  height: 6px;
+  background: var(--brand-tint);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 0.5rem 0 0.35rem;
+}
+.rank-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--brand), var(--brand-bar-2));
+}
+.rank-count {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+/* --- States ------------------------------------------------- */
+.error {
+  color: var(--danger);
+  background: #fdecea;
+  border: 1px solid #f5c6c0;
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+}
+.empty {
+  color: var(--muted);
+  text-align: center;
+  padding: 3rem 1rem;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}
+
+@media (max-width: 540px) {
+  .filters .btn-primary {
+    margin-left: 0;
+    width: 100%;
+  }
+  .field {
+    flex: 1 1 8rem;
+  }
+}

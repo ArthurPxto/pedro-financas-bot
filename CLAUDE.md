@@ -27,6 +27,9 @@ docker compose up -d                 # postgres:16 on localhost:5432 (pedro/pedr
 
 # Run the web API (Fase 3 — separate process, same DB/services; needs WEB_JWT_SECRET)
 .venv/bin/python -m src.api
+
+# Web dashboard SPA (React/Vite — lives in web/, consumes the API)
+cd web && npm install && npm run dev   # :5173 ; `npm run build` typechecks + bundles
 ```
 
 There is no automated test suite or linter configured. `requirements.txt` is a fully-pinned flat freeze (`uv pip freeze`), not a curated direct-deps file.
@@ -86,5 +89,6 @@ Any change to the extracted-field set must stay consistent across: the Gemini pr
 - **Bot commands** live only as routing in `app.py._handle_text` (a command→handler dict): `/start`, `/gasto`, `/listar`, `/resumo`, `/criar_empresa`, `/entrar`, `/empresa`, `/empresas`, `/trocar`, `/categorias`, `/add_categoria`, `/centros`, `/add_centro`, (Fase 2) `/reembolsos`, `/aprovacoes`, `/aprovar`, `/aprovar_todos`, `/rejeitar`, `/reembolsar`, and (Fase 3) `/login` (envia o magic-link do painel web). The Telegram adapter just forwards text; it has no command knowledge.
 - `src/adapters/spreadsheet.py` (Google Sheets) is **still not wired** and predates Fase 0 — treat as legacy/unused. Fase 3 shipped **backend-first** (API + channel auth + JSON reports + CSV export) and **deferred** the React/Vite SPA, web approvals, and Google Sheets/PDF export; wiring this adapter behind a port belongs to that deferred export work.
 - **Web auth (Fase 3)** is stateless and channel-mediated: `/login` in the bot issues a short login JWT inside a magic-link to `WEB_BASE_URL/login?token=…`; the SPA calls `POST /auth/exchange` to swap it for a session JWT (Bearer). No sessions table. Report endpoints are **admin/owner only** — the panel is the manager's view; employees stay in the chat. Aggregation is done in Python in `ReportService` (fine for MVP volumes; swap for SQL GROUP BY if it grows).
+- **`web/` (SPA, React + Vite + TS)** is a standalone frontend, **not** wired into the Python build — its own `package.json`/`npm`. Talks to the API at `VITE_API_URL` (default `http://localhost:8000`), session JWT in `localStorage`. `App.tsx` is the auth bootstrap (reads `?token=` from the magic-link → `exchange` → `getMe`; 401 → re-login gate, non-admin → "painel dos gestores"); `Dashboard.tsx` is the manager view (hero total + de/até/status filters + ledger-style ranked bars per category/cost-center/user/month + CSV). No charting lib — bars are plain CSS. Fonts via Google Fonts `<link>` (swap to bundled if offline rendering is needed). The known npm-audit warnings are the esbuild dev-server advisory (Vite), dev-only.
 - `google-generativeai` is deprecated upstream (warns on import); a future task may migrate to `google-genai`. Out of Fase 0 scope.
 - The `Expense.date` (domain `date`) vs ORM `date_at` column split is deliberate; `ExtractedExpense.date` is the only string form, parsed in `ExpenseService`.
